@@ -4,6 +4,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from mes.config import get_settings
+from mes.db import models  # noqa: F401  — register ORM models on Base.metadata
 from mes.db.base import Base
 
 # this is the Alembic Config object, which provides

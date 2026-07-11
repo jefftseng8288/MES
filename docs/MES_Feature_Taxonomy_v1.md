@@ -7,7 +7,29 @@
 
 ---
 
-## 一、v1 範圍:9 個 feature
+## 〇、分類軸:Market Feature vs Meta-Feature
+
+> 註:2026-07-11 Phase 1-C 細化:新增元特徵分類軸與 `store_name_seed`。屬設計細化,版號不動。
+
+feature 依「描述的對象」分兩類:
+
+- **市場特徵(Market Feature):** 描述 **Reality 實體**(Store 等)的狀態。即 §一 的 9 個:
+  `uses_review_app` / `theme_name` / `product_count` / `avg_price` / `price_range` /
+  `country` / `language` / `currency` / `is_active`。
+- **元特徵(Meta-Feature / Process Feature):** 描述 **MES 系統自身的認知與對接事件**(抓取、推論),
+  不是 Reality 實體的狀態:
+  - `observed_on_app_store` — 在 App Store 評論頁看到一筆 Store Name(掛在 `store_name_seed` 上)。
+  - `inferred_domain` — 從 Store Name 推論 domain 的結果(成功 → entity_ref 指向 store;失敗 →
+    依 `fetch_failed` / `not_found` 分流,全欄 NULL)。
+
+**新增 entity_type:** `store_name_seed` —— 尚未推出 domain 前的「Store Name 種子」實體,元特徵掛載點。
+
+兩類同用一套 Observation Schema(同一組 value 欄與 CHECK),差別只在「feature 描述的是市場,還是系統自己的過程」。
+元特徵讓「MES 的抓取/推論能力本身」成為可被觀測、可被評估的對象(例:`inferred_domain` 的 not_found 佔比)。
+
+---
+
+## 一、v1 範圍:9 個 feature(Market Feature)
 
 Phase 1 crawler 的全部工作範圍。七大類只覆蓋三類半;Performance / Growth / Pain / Market 全部留白
 (Growth 等時間序列自然長出、Pain/Market 屬後面的認知層、Performance 屬深掃階段)。

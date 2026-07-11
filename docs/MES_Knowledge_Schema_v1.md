@@ -23,9 +23,13 @@ knowledge_state {
   entity_id                -- 歸屬
   feature                  -- 哪個 feature 的當前值
   value_type               -- 同 Observation('string'|'number'|'boolean'|'entity_ref'|'json')
-  value_raw
-  value_normalized
-  value_entity_id          -- nullable
+  value_raw                -- 該當前值的原始值原貌,nullable(語義同 Observation)
+  value_text               -- string 型正規值,nullable
+  value_number             -- number 型正規值,nullable
+  value_boolean            -- boolean 型正規值,nullable
+  value_json               -- json 型正規值,nullable
+  value_entity_id          -- entity_ref 型正規值,nullable(僅 value_type='entity_ref')
+  producer                 -- 產生此值的方法/模型,NOT NULL + CHECK(自來源觀測帶上)
   source_observation_id    -- ★ 本表靈魂:此當前值來自哪筆 Observation(Provenance 鎖)
   observed_at              -- 該筆來源觀測的時間
   confidence               -- 該筆來源觀測的信心等級
@@ -35,7 +39,15 @@ knowledge_state {
 主鍵:(entity_id, feature) — 每個 entity 的每個 feature 只有一列「當前值」
 ```
 
-**`source_observation_id` 不可為空。** Knowledge_State 是衍生品,每個值必須能追回它的來源觀測 — 沒有它,這張表就是「不知道自己從哪來」的斷鏈表,違反 Provenance。
+> 註:value 欄於 2026-07-11 Phase 1-B 實作階段細化為 discriminated union(單一 `value_normalized` 欄 → 依 `value_type` 分流的 typed 欄)。另 2026-07-11 Phase 1-C 加入 `producer` 欄。兩者皆為欄位實作細化,非設計變更,版號不動。
+
+**`producer` 欄(NOT NULL + CHECK,與 Observation_Log 同構)。** 投影時把來源觀測的 `producer`(mes_crawler_v1 / duckduckgo_v1 / manual_v1)一併帶上,讓「這個當前值由哪個方法/模型產生」在 Knowledge 層也追得到。定義與三欄分工見 `MES_Observation_Schema_v1.md` 第七節。
+
+**value 欄與 Observation_Log 同構。** Knowledge_State 是 Observation_Log 的投影,值容器形狀必須一致(value_raw / value_text / value_number / value_boolean / value_json / value_entity_id 六欄),否則投影時要做型別轉換 —— 那正是腐敗點。
+
+**value 欄 CHECK 契約(與 code 一致):** Knowledge_State **無 status 欄**,只收 `status='observed'` 的來源投影,故無 failed / not_found 分支。其 CHECK:`value_raw` 非空(非 NULL 且 `btrim(value_raw) <> ''`)+ 正好一個與 `value_type` 相符的 typed 欄非空、其餘全空(對應規則同 Observation Schema §2)。
+
+**`source_observation_id` 不可為空(不變)。** Knowledge_State 是衍生品,每個值必須能追回它的來源觀測 — 沒有它,這張表就是「不知道自己從哪來」的斷鏈表,違反 Provenance。
 
 ---
 

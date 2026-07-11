@@ -14,7 +14,20 @@
 | `docs/MES_Feature_Taxonomy_v1.md` | v1(2026-06-27 定稿) | Feature Taxonomy |
 | `docs/MES_Build_vs_Buy_Matrix_v1.md` | v1(2026-07-03 定稿) | Build vs Buy Matrix |
 
-**最後更新日期:** 2026-07-10
+**最後更新日期:** 2026-07-11
+
+---
+
+## 驗收(Acceptance)三態說明
+
+> **工作做完 ≠ 驗收通過。**(呼應 CLAUDE.md:code 改完 ≠ 驗過。)每個 Phase 的「工作項目 checklist」只表示「事情做了」;是否達標由獨立的 **### ✅ 驗收(Acceptance)** 子區塊判定。驗收狀態四態:
+
+- **⬜ 未驗收:** 工作可能做完了,但驗收根本還沒跑。
+- **🔄 驗收中:** 驗收正在進行(如「連續 7 天累積」跑到第 N 天)。
+- **✅ 通過:** 驗收已跑完且達標。
+- **❌ 未通過:** 驗收已跑完但未達標。
+
+**鐵律:不可因為工作 checklist 勾滿就把驗收標成通過。**
 
 ---
 
@@ -36,7 +49,12 @@
 - [x] Build vs Buy Matrix v1(四分類 Raw / Inferred / Historical / Third-party estimate;第一版不採購 Store Leads)
 - [x] Observation / Knowledge 拍板為兩張表(Observation_Log 唯一真相 + Knowledge_State 物化視圖)
 
-**驗收標準:** 能拿一家真實的店,在紙上(不寫程式)把它的特徵手動填進 schema,無「不知道存哪欄」的卡頓。
+### ✅ 驗收(Acceptance)
+
+**狀態:** ✅ 通過
+
+**驗收條件:**
+- [x] 能拿一家真實的店,在紙上(不寫程式)把它的特徵手動填進 schema,無「不知道存哪欄」的卡頓(五份 schema 已定稿並落成 code,實作亦印證可填)
 
 **停止條件:** Entity 關係沒定清 / Observation 邊界沒劃清 / 五 metadata 沒釘死 / Feature 還寫死在 schema → 都不進 Phase 1。
 
@@ -44,13 +62,13 @@
 
 ## Phase 1 — Crawler → Observation Log(每天乾淨累積)
 
-**狀態:** 🔄 執行中(Running)— A 工程基礎設施已完成;B/C/D 未開始
+**狀態:** 🔄 執行中(Running)— A 工程基礎設施、B 資料層完成;C 抓取推論鏈路骨架完成並實測(排程未做);D Feature 抓取未開始
 
 **目的:** 證明「持續產生乾淨、中立、結構正確、掛在正確 Entity 上的觀測」能穩定運作。
 
 **進入條件:** Phase 0 五份定稿(✅ 已達成)。
 
-> **進度小結(2026-07-10):** A(工程基礎設施)已完成——最小工程骨架 + 本機 PostgreSQL 16 開發環境、連線驗證、lint/format/type-check/pytest 皆就緒。B/C/D 尚未開始(尚無任何 ORM model,`migrations/versions/` 為空,無 Scraper/Inference/寫入鏈路)。
+> **進度小結(更新於 2026-07-11):** A(工程基礎設施)+ B(資料層)已完成——最小工程骨架 + PostgreSQL 16 環境、async 連線層;三張核心表(entity / observation_log / knowledge_state)ORM + Alembic migration 就緒,Append-Only trigger 與 Provenance NOT NULL 雙層約束已在 DB 層落地並實測。C(抓取推論鏈路)/ D(Feature 抓取)尚未開始(無 Scraper/Inference/寫入鏈路)。
 
 ### A. 專案基礎設施 — ✅ 完成
 
@@ -61,22 +79,31 @@
 - [x] pytest 測試骨架(`tests/test_database_connection.py` 實連 PostgreSQL 跑 `SELECT 1`,非 mock)
 - [x] 裁剪確認:不建 FastAPI、不建 Dashboard、不建 AI 模組(相依中無 FastAPI;README §10 明列尚未實作範圍)
 
-### B. 資料層(依 Entity / Observation / Knowledge Schema 三份文件)— ⏳ 未開始
+### B. 資料層(依 Entity / Observation / Knowledge Schema 三份文件)— ✅ 完成
 
-- [ ] Entity 表(entity_id / entity_type / canonical_key / created_at)
-- [ ] Observation_Log 表(Append-Only;完整欄位依 Observation Schema v1;entity_id 不可為空)
-- [ ] Knowledge_State 表(物化視圖;source_observation_id 必填;主鍵 entity_id + feature)
-- [ ] ReviewApp Signature Library(loox / judgeme / yotpo / okendo / stamped)
-- [ ] Alembic migration 建立以上表
-- [ ] Provenance 硬約束:寫入時 entity_id 為空即拒絕(測試涵蓋)
+- [x] Entity 表(entity_id UUID / entity_type VARCHAR+CHECK / canonical_key / created_at;unique on (entity_type, canonical_key))
+- [x] Observation_Log 表(Append-Only;完整欄位依 Observation Schema v1;entity_id NOT NULL;DB 層 trigger 物理拒絕 UPDATE/DELETE)
+- [x] Knowledge_State 表(物化視圖;source_observation_id NOT NULL;複合主鍵 (entity_id, feature);允許 UPDATE)
+- [x] ReviewApp Signature Library(loox / judgeme / yotpo / okendo / stamped 以 entity_type='review_app' 種子寫入)
+- [x] Alembic migration 建立以上表 + trigger + CHECK/UNIQUE 約束 + 種子(可完整 down/up 回滾,已實測)
+- [x] Provenance 硬約束:observation_log.entity_id 為空即拒絕、knowledge_state.source_observation_id 為空即拒絕(ORM nullable=False + DB NOT NULL 雙層;測試涵蓋)
 
-### C. 抓取與推論鏈路(依 Roadmap v8 五步)— ⏳ 未開始
+> **實測驗收(2026-07-11,含 value 欄修訂):** `pytest` 30 passed(真連 DB,非 mock)。已證明:三表建立、Append-Only 鎖拒絕 UPDATE/DELETE、Provenance NOT NULL 拒絕空值、knowledge_state 可正常 UPDATE、受控字串 CHECK 拒絕非法 status/confidence/value_type/source。migration down→up 回滾驗證通過。
+>
+> **value 欄改為 discriminated union(2026-07-11 修訂 f215450ec0a6,未新增 migration):** 原單欄 `value_raw`+`value_normalized` 改為 `value_type` + `value_raw`(feature 原始值原貌)+ typed 分欄 `value_text` / `value_number` / `value_boolean` / `value_json`(JSONB)/ `value_entity_id`,observation_log 與 knowledge_state 兩表同構(投影不做型別轉換)。加雙層 CHECK:(1) status↔value_raw(observed 需非空且 `btrim<>''`;failed/not_found 需 NULL);(2) status↔value_type↔typed 欄(observed 正好一個相符 typed 欄非空、其餘全空;failed/not_found 全空;value_type 於失敗時保留)。knowledge_state 版無 status 分支(只投影 observed)。逐分支測試涵蓋:5 種 value_type 正確組合可寫、錯誤組合/多欄並填被拒、value_raw 空/空白被拒、failed 帶值被拒。
 
-- [ ] 1. Shopify App Store 評論區 Scraper:遵守 `apps.shopify.com` robots.txt 速率限制;5–25 秒隨機 `time.sleep`;抓 Loox 評論區 Store Name
-- [ ] 2. Inference 引擎 Name→Domain:Store Name + 後綴關鍵字 → 網頁搜尋(第一版實作 DuckDuckGo 網頁解析,搜尋源為可替換零件)→ Regex 蒸餾第一筆 Domain
-- [ ] 3. Normalize:Domain 轉小寫 / 去 scheme / 去 www / 去 trailing path / 去 port → canonical_key → 寫 Entity
-- [ ] 4. Event Sourcing 寫入:先 append Observation_Log(entity_id 不可空)→ 再投影 Knowledge_State(無直接改 Knowledge_State 的後門)
-- [ ] 5. 失敗三值語義:observed / fetch_failed / not_found,schema 層區分,失敗不偽裝
+### C. 抓取與推論鏈路(依 Roadmap v8 五步)— 🔄 骨架完成,寫入鏈路已實測
+
+- [x] 1. Shopify App Store 評論區 Scraper(`src/mes/scrape.py`):遵守 robots.txt(`/reviews` 允許)、5–25 秒隨機 `time.sleep`;抓 Loox 評論頁 Store Name。selector 於 2026-07-11 對真實 HTML 實測(`data-merchant-review` 區塊 → `title` 屬性),每頁 ~10 則
+- [x] 2. Inference 引擎 Name→Domain(`src/mes/inference.py`):Store Name + "shopify store" → DuckDuckGo(`html.duckduckgo.com/html/`,可替換零件)→ regex 蒸餾 → 黑名單過濾取第一筆可信 domain。實測 5/5 命中(見 progress)
+- [x] 3. Normalize(`src/mes/normalize.py`):domain 小寫/去 scheme/去 www/去 path/去 port → canonical_key → 寫 store entity;seed name 正規化 → `seed:` 前綴。收斂單一模組
+- [x] 4. Event Sourcing 寫入(`src/mes/ingest.py`):雙骨牌先 append Observation_Log(entity_id 不可空)。Knowledge_State 投影屬 Phase 2,本階段不做
+- [x] 5. 失敗三值語義:inference 結果 observed / fetch_failed / not_found 精確分流(fetch_failed=推論沒執行成功;not_found=執行了但搜不到可信 domain,≠店已死),寫入時失敗全欄 NULL、通過 CHECK
+- [ ] 連續 7 天自動排程跑(驗收條件,尚未做;本階段先證明鏈路正確)
+
+> **實測驗收(2026-07-11):** `pytest` 43 passed(6 個 1-C 寫入鏈路 + producer/source CHECK 測試,真連 DB)。live run 對真實店跑 DuckDuckGo,observed / fetch_failed / not_found 三種狀態均實際出現(連續查詢後 DDG 限流→fetch_failed,誠實記錄)。
+>
+> **schema 細化(2026-07-11,版號不動,已物理落地 DB):** (1) source 受控清單加 `web_search`(inferred_domain 不再假記為 html_page);(2) 新增 `producer` 欄(observation_log + knowledge_state,NOT NULL + CHECK,三值 mes_crawler_v1 / duckduckgo_v1 / manual_v1);(3) crawler_version 歸位為純 git hash(不再塞 duckduckgo_v1)。三欄分工:source=管道 / producer=方法模型 / crawler_version=程式碼版本。新增 migration `d9eb673e28aa`(down→up 於空表回滾通過)。dev 資料選擇清空重跑(TRUNCATE 繞過 Append-Only trigger → 完整鏈路重建 → 重跑 live)。
 
 ### D. 第一版 Feature 範圍(依 Feature Taxonomy v1,9 個)— ⏳ 未開始
 
@@ -93,7 +120,20 @@
 > 註記:Inference 引擎第一版搜尋源(DuckDuckGo 網頁解析)的實際可行性,需在 M4 上實測確認;若不穩則換可替換零件,不動架構(呼應 P6 Provider Agnostic)。
 > 暫不抓:Performance / Growth / Pain / Market(理由見 Taxonomy 文件的留白說明)。
 
-**驗收標準:** 連續 7 天每天自動跑、有新增,且五 metadata 齊全、Append-Only 沒覆蓋、entity 歸屬正確。→ 不是「能抓」就成功,是「抓進來的資料乾淨且結構對」才成功。
+### ✅ 驗收(Acceptance)
+
+**狀態:** ⬜ **未驗收**
+
+> ⚠️ 工作項目 A / B / C 核心(雙骨牌 + 三值 + producer)已完成並測試通過(`pytest` 43 passed、真連 DB),**但這不等於 Phase 1 驗收通過**。驗收要求「連續 7 天每天自動跑、有新增」+「規模累積」,尚未做——本次僅小規模偵察 live run(5 家)證明鏈路正確。**不可因工作 checklist 勾滿就標成通過。**
+
+**驗收條件:**（全部未達成）
+- [ ] 連續 7 天每天自動排程跑,每天都有新增
+- [ ] 規模累積(目標約 1000 家店)
+- [ ] 五 metadata 齊全(feature / value / source / observed_at / confidence)+ entity 歸屬正確
+- [ ] Append-Only 沒覆蓋(再次觀測 = 新增帶新 timestamp 的一筆)
+- [ ] 失敗不被記成 0 / 無(observed / fetch_failed / not_found 三值語義正確)
+
+> 判準:不是「能抓」就成功,是「抓進來的資料乾淨且結構對、且能持續穩定累積」才算通過。
 
 **停止條件:** 出現「失敗被記成 0/無」、Update 覆蓋、metadata 缺漏 → 立即停修。
 
@@ -130,7 +170,13 @@
 - [ ] 支援查詢「某 Entity 的某 feature 隨時間的變化序列」
 - [ ] 重建能力:可砍掉 Knowledge_State 全表並從 Observation_Log 完整重建(可回滾驗收條件)
 
-**驗收標準:** 能查詢「某 Entity 的某 feature 隨時間的變化序列」→ 證明 Append-Only 歷史讀得出來,Growth 原料齊了。
+### ✅ 驗收(Acceptance)
+
+**狀態:** ⬜ 未驗收(Phase 尚未開始)
+
+**驗收條件:**
+- [ ] 能查詢「某 Entity 的某 feature 隨時間的變化序列」(證明 Append-Only 歷史讀得出來,Growth 原料齊了)
+- [ ] 可砍掉 Knowledge_State 全表並從 Observation_Log 完整重建
 
 **停止條件:** Normalize 混入判斷/評分 → 違反 P2,停;歷史查不出來 → Append-Only 沒生效,停。
 
@@ -152,7 +198,13 @@
 - [ ] 每個 Insight 記 metadata:內容 / 產生者(rule_v1 / stat_v1)/ 基於哪些 Knowledge / 時間 / 信心
 - [ ] 確保 Insight 中不混入任何「預測」(預測屬於 Hypothesis 層)
 
-**驗收標準:** 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者與來源;Insight 中沒有混入任何預測。
+### ✅ 驗收(Acceptance)
+
+**狀態:** ⬜ 未驗收(Phase 尚未開始)
+
+**驗收條件:**
+- [ ] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者與來源
+- [ ] Insight 中沒有混入任何預測
 
 **停止條件:** Insight 裡開始夾帶預測/賭注 → 停(Describe 與 Predict 混了)。
 
@@ -176,7 +228,15 @@
 - [ ] 可分別評估模型的觀察力(Insight)與推理力(Hypothesis)
 - [ ] ⚠️ **待拍板:第一版「學習深度」** — 建議「只記錄 + 累積驗證次數」,confidence 先不自動裁決(守 P1 held);schema 預留「調信心度」與「長新假說」,第一版不開啟。**此項在 Roadmap v8 仍為待拍板,尚未定案。**
 
-**驗收標準:** 假說結構化、帶 evidence、引用 Insight、可審核;reject 進 Decision Graph;換模型能各自產生假說(P4 地基成立);可分別評估觀察力與推理力。
+### ✅ 驗收(Acceptance)
+
+**狀態:** ⬜ 未驗收(Phase 尚未開始)
+
+**驗收條件:**
+- [ ] 假說結構化、帶 evidence、引用 Insight、可審核
+- [ ] reject 進 Decision Graph
+- [ ] 換模型(GPT ↔ Claude)讀同一份 Knowledge/Insight 能各自產生假說(P4 地基成立)
+- [ ] 可分別評估模型的觀察力(Insight)與推理力(Hypothesis)
 
 **停止條件:** AI 把推論當事實寫進 Knowledge / 假說無 evidence 或不可審核 / AI 做 approve 以外的決策 → 停。
 
@@ -196,6 +256,16 @@
 - [ ] Cold email 合規 + 獨立發信網域(若用 email 需獨立網域,絕不用 reviews@escapeflow.app)
 - [ ] UTM → Shopify Partner API 歸因鏈:確認通的
 - [ ] 本地部署備份 + 防駭(資產是無法重建的累積觀測,備份是地基等級必要)
+
+### ✅ 驗收(Acceptance)
+
+**狀態:** 🔄 驗收中(Reddit 帳號養成進行中;其餘未起步)
+
+**驗收條件:**
+- [ ] 至少一種合規、可收反饋的接觸行為就緒(此為 Phase 4 進入條件之一)
+- [ ] 本地部署備份 + 防駭到位(累積觀測是無法重建的資產)
+
+**停止條件:**（此為平行準備 Phase,無硬停止條件;若接觸行為的合規性存疑則暫緩該行為,不阻擋 Phase 0–3。）
 
 > 商品化紅線(封存):當「系統對 EscapeFlow 真的有用、決定商品化」時,才討論資料搬遷與商家機密安全合規。在那之前不碰。
 
@@ -219,7 +289,13 @@
 - [ ] 內容發出前 Jeff approve;高風險行為(cold email)押後,先用低風險行為起步
 - [ ] 依武器庫優先序起步:1) App Store listing 優化(免費) 1) Build in Public + 內容 → 2) App Store 廣告(小錢測) → 3) Cold Email
 
-**驗收標準:** 跑通一個完整循環:假設 → 行動 → Outcome → 綁回 Experiment 綁回 Hypothesis。哪怕只接觸十幾家、反饋很粗,只要「特徵→行為→結果」鏈完整就成功。
+### ✅ 驗收(Acceptance)
+
+**狀態:** ⬜ 未驗收(Phase 尚未開始)
+
+**驗收條件:**
+- [ ] 跑通一個完整循環:假設 → 行動 → Outcome → 綁回 Experiment 綁回 Hypothesis
+- [ ] 「特徵 → 行為 → 結果」鏈完整(哪怕只接觸十幾家、反饋很粗)
 
 **停止條件:** Experiment 做了但 Outcome 收不到 / 一次動多變數 / 樣本不足卻下結論 → 停。
 
@@ -242,6 +318,12 @@
 - [ ] 人類 reject = Decision 事件進 Decision Graph;未來 AI 再提同樣建議,系統能說「這曾被否決,要重檢嗎?」
 - [ ] 全程可追溯(P5)+ 可回滾(Append-Only + Decision Graph)
 
-**驗收標準:** 出現第一個「假說因新證據改變 confidence,並導致 Jeff 調整方向」的完整事件;全程可追溯 + 可回滾。
+### ✅ 驗收(Acceptance)
+
+**狀態:** ⬜ 未驗收(Phase 尚未開始)
+
+**驗收條件:**
+- [ ] 出現第一個「假說因新證據改變 confidence,並導致 Jeff 調整方向」的完整事件
+- [ ] 全程可追溯(P5)+ 可回滾(Append-Only + Decision Graph)
 
 **停止條件:** 樣本不足就裁決生死 / 演化不可追溯或不可回滾 → 停。
