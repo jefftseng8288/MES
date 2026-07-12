@@ -7,6 +7,8 @@
 
 ## 一、定位(不可動搖)
 
+> （此為資料層硬約束,不因「系統原則可演化」的口徑而鬆動。系統原則可因證據演進;資料腐敗防線不可。）
+
 **Knowledge_State 是 Observation_Log 的物化視圖(materialized view),是衍生品,不是真相。**
 
 - 真相只存在於 Observation_Log(Append-Only,唯一 source of truth)。
