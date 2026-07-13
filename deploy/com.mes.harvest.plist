@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mes.harvest</string>
+
+    <!-- Resident APScheduler daemon; fires the daily batch at 02:00 UTC (= 10:00 Taiwan). -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/cashflow/Documents/MES/.venv/bin/python</string>
+        <string>-m</string>
+        <string>mes.schedule</string>
+    </array>
+
+    <!-- cwd = project root so .env (MES_DATABASE_URL) and logs/ resolve correctly. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/cashflow/Documents/MES</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <!-- Keep the daemon resident; relaunch if it exits (survives crashes / re-login). -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/cashflow/Documents/MES/logs/harvest_daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/cashflow/Documents/MES/logs/harvest_daemon.err.log</string>
+</dict>
+</plist>

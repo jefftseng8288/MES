@@ -99,11 +99,24 @@
 - [x] 3. Normalize(`src/mes/normalize.py`):domain 小寫/去 scheme/去 www/去 path/去 port → canonical_key → 寫 store entity;seed name 正規化 → `seed:` 前綴。收斂單一模組
 - [x] 4. Event Sourcing 寫入(`src/mes/ingest.py`):雙骨牌先 append Observation_Log(entity_id 不可空)。Knowledge_State 投影屬 Phase 2,本階段不做
 - [x] 5. 失敗三值語義:inference 結果 observed / fetch_failed / not_found 精確分流(fetch_failed=推論沒執行成功;not_found=執行了但搜不到可信 domain,≠店已死),寫入時失敗全欄 NULL、通過 CHECK
-- [ ] 連續 7 天自動排程跑(驗收條件,尚未做;本階段先證明鏈路正確)
+- [x] 連續 7 天自動排程跑的**機制**已建置並驗證(見 E);**7 天實跑本身**尚未開始(驗收條件,見驗收區)
 
 > **實測驗收(2026-07-11):** `pytest` 43 passed(6 個 1-C 寫入鏈路 + producer/source CHECK 測試,真連 DB)。live run 對真實店跑 DuckDuckGo,observed / fetch_failed / not_found 三種狀態均實際出現(連續查詢後 DDG 限流→fetch_failed,誠實記錄)。
 >
 > **schema 細化(2026-07-11,版號不動,已物理落地 DB):** (1) source 受控清單加 `web_search`(inferred_domain 不再假記為 html_page);(2) 新增 `producer` 欄(observation_log + knowledge_state,NOT NULL + CHECK,三值 mes_crawler_v1 / duckduckgo_v1 / manual_v1);(3) crawler_version 歸位為純 git hash(不再塞 duckduckgo_v1)。三欄分工:source=管道 / producer=方法模型 / crawler_version=程式碼版本。新增 migration `d9eb673e28aa`(down→up 於空表回滾通過)。dev 資料選擇清空重跑(TRUNCATE 繞過 Append-Only trigger → 完整鏈路重建 → 重跑 live)。
+
+### E. 每日撈取排程 + 撈取健康報告(通往 7 天驗收)— ✅ 機制完成,7 天實跑待啟動
+
+- [x] 每日排程器(`src/mes/schedule.py`,APScheduler,cron 09:00 UTC,`max_instances=1`/`coalesce`;`--once` 可手動觸發一批)
+- [x] 每日一批 = 30 筆 Seed(`src/mes/pipeline.py::run_daily_batch`),沿用既有雙骨牌鏈路,核心未動
+- [x] 節流:每筆之間 **20–150 秒隨機** sleep(隨機為硬性要求,防機器人識別;跨度 130 秒刻意拉寬,更不規則、更像人類);此區間為「待一週回饋後調整」的保守起點。30×~85s ≈ 42 分鐘/批
+- [x] Seed 去重仍生效:只取「未撈過的新 Store Name」,不重複撈同店湊數;供給不足如實回報(`actual < requested`)
+- [x] 撈取健康報告:每批印出 + 寫入 `logs/harvest_health.log`,**三比例分開**(observed / not_found / fetch_failed),不合併成單一「成功率」;判讀說明標明 fetch_failed 為「該不該調整節奏」主儀表
+- [x] 批次界定用 `observed_at` 日期(不加 run_id 到核心表);`compute_health_for_date` 供隔天回看
+- [ ] **連續 7 天實跑**(每天一批、每天一份報告,累積 7 個 fetch_failed 資料點)— 尚未開始
+- [ ] 第一版不做自動告警/自動退避(先累積經驗,規則成熟再自動化)
+
+> **實測(2026-07-13,縮小驗證):** `pytest` 48 passed(+5 harvest 測試)。手動觸發兩批(間隔刻意縮短以快速驗證整條線):第一批 8 筆(間隔 2–5s)→ observed 2(25%)/ not_found 0 / **fetch_failed 6(75%)**;第二批 6 筆(間隔 5–15s)→ **fetch_failed 6(100%)**。連續壓縮間隔猛打 → DuckDuckGo 已對本機硬限流,健康報告**誠實暴露**(未美化成「成功率」把限流藏起來)。雙骨牌仍正確寫入(fetch_failed 全欄 NULL、通過 CHECK)。這強力印證:**壓縮間隔會把井打壞、20–150 秒寬隨機保守起點的必要**;真實三比例要在真實節奏(20–150s)+ DDG 冷卻後,靠一週資料才看得準(對照上一輪首次在較寬有效間隔下曾 5/5 命中)。Loox 供給:各批無短缺;30×7=210 的完整週供給未驗(取決於評論頁翻頁深度,`MAX_PAGES=12` 上限約 120 名/批)。
 
 ### D. 第一版 Feature 範圍(依 Feature Taxonomy v1,9 個)— ⏳ 未開始
 
@@ -122,9 +135,9 @@
 
 ### ✅ 驗收(Acceptance)
 
-**狀態:** ⬜ **未驗收**
+**狀態:** ⬜ **未驗收**（排程機制已就緒,7 天實跑尚未啟動）
 
-> ⚠️ 工作項目 A / B / C 核心(雙骨牌 + 三值 + producer)已完成並測試通過(`pytest` 43 passed、真連 DB),**但這不等於 Phase 1 驗收通過**。驗收要求「連續 7 天每天自動跑、有新增」+「規模累積」,尚未做——本次僅小規模偵察 live run(5 家)證明鏈路正確。**不可因工作 checklist 勾滿就標成通過。**
+> ⚠️ 工作項目 A / B / C 核心 + E 排程機制已完成並測試通過(`pytest` 48 passed、真連 DB),**但這不等於 Phase 1 驗收通過**。驗收要求「**連續 7 天**每天自動跑、有新增」+「規模累積」——排程器已建好可啟動,但 7 天的實際累積**尚未開始跑**(至今只有縮小驗證與偵察 live run)。**不可因工作 checklist 勾滿就標成通過;要等 7 天真的跑完、由 Jeff 看 fetch_failed 曲線判定。** 啟動 daemon 跑出第一批日報後,此狀態才轉 🔄 驗收中。
 
 **驗收條件:**（全部未達成）
 - [ ] 連續 7 天每天自動排程跑,每天都有新增

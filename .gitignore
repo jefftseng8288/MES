@@ -22,6 +22,9 @@ dist/
 .coverage
 htmlcov/
 
+# Harvest runtime logs (health reports)
+logs/
+
 # macOS
 .DS_Store
 

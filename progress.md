@@ -6,6 +6,35 @@
 
 ---
 
+## 2026-07-13 — Phase 1 每日撈取排程 + 撈取健康報告(通往 7 天驗收)
+
+- **建的檔(核心鏈路未動,只在外面包一層):** `src/mes/pipeline.py`(`run_daily_batch` 批次執行 + `HealthReport` 三比例報告 + `compute_health_for_date` 隔天回看)、`src/mes/schedule.py`(APScheduler daemon,cron 09:00 UTC,`--once` 手動觸發)、`tests/test_phase1_harvest.py`(5 測試)。改:`pyproject.toml`(+apscheduler、mypy 忽略其 stubs)、`.gitignore`(+`logs/`)。
+- **排程:** 每天一批 = 30 筆 Seed;每筆之間 **20–150 秒隨機** sleep(隨機為硬性要求;跨度 130 秒刻意拉寬,更不規則、更像人類;30×~85s ≈ 42 分鐘/批)。第一版**不做**自動告警/退避——先累積一週經驗再說。
+- **健康報告(誠實三比例,不合併):** observed / not_found / fetch_failed **分開**呈現 + 各自百分比;判讀說明點名 **fetch_failed 是「該不該調整節奏」主儀表**,not_found 高只代表這批死店多、非系統問題。印出 + append 到 `logs/harvest_health.log`。
+- **Seed 去重仍生效:** 只取未撈過的新 Store Name,不重複撈同店湊數;供給不足以 `actual < requested` 如實呈現。
+- **首次實跑真實觀察(縮小驗證,間隔刻意縮短以快速跑完整條線,非生產 20–150s):**
+  - 第一批 8 筆(間隔 2–5s):observed **2(25%)** / not_found **0** / fetch_failed **6(75%)**。
+  - 第二批 6 筆(間隔 5–15s):**fetch_failed 6(100%)**。
+  - **DuckDuckGo 限流實況:** 今天連續兩次壓縮間隔猛打 → DDG 已對本機**硬限流**(第二批 100% fetch_failed)。這正是健康報告要暴露的訊號,報告誠實顯示(**未**美化成「成功率」把限流藏起來);雙骨牌仍正確寫入(fetch_failed 全欄 NULL、過 CHECK)。強力印證:**壓縮間隔會把井打壞、20–150 秒寬隨機保守起點的必要**。真實三比例要在真實節奏 + DDG 冷卻後靠一週資料才看得準(對照上一輪首次在較寬有效間隔下曾 5/5 命中)。
+  - **Loox 供給:** 各批順利湊到新 Seed,無短缺;30×7=210 的完整週供給**未驗**(取決於評論頁翻頁深度;`MAX_PAGES=12` 上限約 120 名/批)。
+  - 排程接線驗證:`build_scheduler()` 產生 `daily_harvest` job(cron 09:00 UTC)。
+- **測試:** `pytest` **48 passed**(43 + 5 harvest);ruff / mypy 綠。既有雙骨牌/三值/CHECK 測試全過,核心未被弄壞。
+- **Phase 1 驗收狀態:** 維持 **⬜ 未驗收**——排程機制就緒,但「連續 7 天實跑」尚未開始。啟動 daemon 跑出第一批日報後才轉 🔄 驗收中。
+
+### 排程時間 + daemon 上線(2026-07-13 晚)
+
+- **排程時間改為 02:00 UTC = 台灣 10:00**(`schedule.py` `HARVEST_HOUR=2`)。已驗證下次觸發 = **2026-07-14 02:00 UTC / 台灣 10:00**。
+- **daemon 掛法:macOS launchd LaunchAgent**(`deploy/com.mes.harvest.plist`,已裝到 `~/Library/LaunchAgents/`)。`RunAtLoad`+`KeepAlive` → 常駐、崩潰自動重啟、重新登入後存活。跑 `.venv/bin/python -m mes.schedule`,`WorkingDirectory` = 專案根(讓 `.env` / `logs/` 解析正確)。已 `launchctl load`,PID 常駐、stdout 印出排程訊息、**未立即跑批**(等冷卻後明早自然跑,DDG 今天壓縮實測後正限流)。
+- **明早第一批用生產間隔 20–150s 隨機**(非今天測試的壓縮間隔)。
+- **管理指令(記給日後):**
+  - 狀態:`launchctl list | grep com.mes.harvest`
+  - 啟動:`launchctl load ~/Library/LaunchAgents/com.mes.harvest.plist`
+  - 停止:`launchctl unload ~/Library/LaunchAgents/com.mes.harvest.plist`
+  - daemon 日誌:`logs/harvest_daemon.out.log` / `.err.log`;每批健康報告:`logs/harvest_health.log`
+  - 手動跑一批(冷卻後才用):`uv run python -m mes.schedule --once`
+- **操作依賴(注意):** 批次寫入需 PostgreSQL 在跑(`docker compose up -d`)。compose 未設 restart 政策,Mac 重開機後需手動起 DB;若 02:00 UTC 時 DB 沒起,該批會失敗(錯誤進 `harvest_daemon.err.log`)。此為已知待辦,非本次範圍。
+- **本批一起 commit(排程 + pipeline + 健康報告 + 時間 + daemon plist)。**
+
 ## 2026-07-12 — 口徑校正:六大原則由「憲法/教條」改為「可演化系統原則」+ 立三層口徑
 
 - **純措辭/框架校正,不改任何 code、不改任何實際約束行為。未 commit(待 Jeff 核對)。**
