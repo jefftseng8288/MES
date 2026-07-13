@@ -1,6 +1,10 @@
 services:
   postgres:
     image: postgres:16
+    # Auto-restart (incl. after a Mac reboot, once Docker Desktop is up) so the
+    # daily harvest daemon always finds the DB running. Not "always" — respects a
+    # deliberate `docker compose stop`.
+    restart: unless-stopped
     environment:
       POSTGRES_DB: mes
       POSTGRES_USER: mes
