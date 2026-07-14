@@ -120,19 +120,28 @@ class HealthReport:
         return "\n".join(lines)
 
 
-async def _next_batch_id(session: AsyncSession, day_str: str) -> str:
-    """Next batch_id for a Taiwan date: 'YYYY-MM-DD-NN', NN = existing max for that day + 1.
+# NN 語義固定:-01/-02/-03 = 三個排程時段(02:00/10:00/21:00 台灣,由 scheduler 傳入
+# slot);-04 以上 = 手動 run。手動編號從 4 起(保留 1~3 給排程時段),與 schedule.py 的
+# SCHEDULED_SLOTS 的槽數對齊。
+FIRST_MANUAL_SEQ = 4
 
-    Self-contained: derives the sequence by looking at what's already in the DB for that
-    day, so restarts / manual --once / the three scheduled runs each get the right number.
+
+async def _resolve_batch_id(session: AsyncSession, day_str: str, slot: int | None) -> str:
+    """Build batch_id 'YYYY-MM-DD-NN' for a Taiwan date.
+
+    slot given (1/2/3, from the scheduler) -> fixed '-0{slot}'. Same-slot re-runs reuse
+    the same batch_id (append semantics — the slot's bucket for that day).
+    slot None (manual --once) -> next number from 04 up (reserving 1~3 for scheduled slots).
     """
+    if slot is not None:
+        return f"{day_str}-{slot:02d}"
     rows = await session.execute(
         select(ObservationLog.batch_id)
         .where(ObservationLog.batch_id.like(f"{day_str}-%"))
         .distinct()
     )
     seqs = [int(b.rsplit("-", 1)[1]) for (b,) in rows.all()]
-    return f"{day_str}-{max(seqs, default=0) + 1:02d}"
+    return f"{day_str}-{max([*seqs, FIRST_MANUAL_SEQ - 1]) + 1:02d}"
 
 
 async def _gather_new_store_names(
@@ -178,6 +187,7 @@ async def _gather_new_store_names(
 
 async def run_daily_batch(
     *,
+    slot: int | None = None,
     batch_size: int = BATCH_SIZE,
     min_delay: float = MIN_SEED_DELAY,
     max_delay: float = MAX_SEED_DELAY,
@@ -186,10 +196,12 @@ async def run_daily_batch(
     session_maker: async_sessionmaker[AsyncSession] | None = None,
     emit: bool = True,
 ) -> HealthReport:
-    """Run one daily batch through the existing chain and return an honest report.
+    """Run one batch through the existing chain and return an honest report.
 
-    For each new Store Name: ingest_seed (骨牌一) -> infer_domain -> ingest success or
-    failure (骨牌二). A fresh 20–150s random sleep separates seeds (production default).
+    ``slot`` = the scheduled slot (1/2/3 for 02:00/10:00/21:00 Taiwan), passed by the
+    scheduler; None = a manual run (batch_id numbered from -04 up). For each new Store
+    Name: ingest_seed (骨牌一) -> infer_domain -> ingest success/failure (骨牌二). A fresh
+    20–150s random sleep separates seeds (production default).
     """
     engine = None
     if session_maker is None:
@@ -200,7 +212,7 @@ async def run_daily_batch(
     try:
         async with session_maker() as session:
             day_str = datetime.now(_TAIPEI).date().isoformat()
-            batch_id = await _next_batch_id(session, day_str)
+            batch_id = await _resolve_batch_id(session, day_str, slot)
             names = await _gather_new_store_names(session, batch_size, page_sleep=page_sleep)
             for i, name in enumerate(names):
                 seed = await ingest_seed(session, name, batch_id=batch_id)

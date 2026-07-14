@@ -111,7 +111,7 @@
 - [x] 時區修正:trigger 明確 `Asia/Taipei`(不依賴系統時區繼承);已驗證三批觸發 = 台灣 02:00/10:00/21:00
 - [x] 每批 = 30 筆未撈過的 Loox Seed(`run_daily_batch`),沿用既有雙骨牌鏈路,核心未動;三批分散(8h/11h/5h)測「一天總量(90 次 DDG)」而非短時爆量
 - [x] 節流:每筆之間 **20–150 秒隨機** sleep(隨機為硬性要求;跨度 130 秒拉寬);保守起點,待真實負載回饋調整。30×~85s ≈ 42 分鐘/批
-- [x] **批號 `batch_id`(observation_log,NOT NULL + 格式 CHECK)**:格式 `YYYY-MM-DD-NN`(台灣日期+當天批序);只加 observation_log、不加 knowledge_state;既有資料以 migration 依 `observed_at`(台灣日期 + >10min 分群)回填,不清除(繞過 Append-Only trigger)
+- [x] **批號 `batch_id`(observation_log,NOT NULL + 格式 CHECK)**:格式 `YYYY-MM-DD-NN`;**NN 固定語義:-01/-02/-03 = 三個排程時段(02:00/10:00/21:00 台灣,scheduler 傳 slot),-04+ = 手動;同時段重跑沿用同批號**;只加 observation_log、不加 knowledge_state;既有資料以 migration 依 `observed_at`(台灣日期 + >10min 分群)回填,不清除(繞過 Append-Only trigger)
 - [x] Seed 去重仍生效:只取未撈過的新 Store Name;供給不足如實回報(`actual < requested`)
 - [x] 撈取健康報告**按批號**:每批印出 + 寫入 `logs/harvest_health.log`,**三比例分開**(observed / not_found / fetch_failed),不合併;判讀標明 fetch_failed 為主儀表,並提示**比較同日越晚的批 fetch_failed 是否越高**(測一天總量的累積限流);`compute_health_for_batch` 供回看
 - [ ] **連續多天三批穩定實跑**(累積 fetch_failed 資料點)— 尚未開始

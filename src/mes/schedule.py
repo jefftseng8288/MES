@@ -28,34 +28,39 @@ from mes.pipeline import run_daily_batch
 # (it defaults to the system-local tz), which previously made hour=2 fire at 02:00
 # LOCAL instead of the intended time. Explicit tz removes the trap.
 # (observed_at is still stored tz-aware UTC; only the fire times are expressed in TW.)
+#
+# Taiwan hour -> fixed slot number. The slot becomes the batch_id suffix: -01/-02/-03
+# ALWAYS mean these three scheduled times (a batch_id tells you which slot). Manual
+# --once runs are numbered from -04 up (see pipeline.FIRST_MANUAL_SEQ). Keep this in
+# sync with pipeline.FIRST_MANUAL_SEQ (= len(SCHEDULED_SLOTS) + 1).
 HARVEST_TZ = "Asia/Taipei"
-HARVEST_HOURS = "2,10,21"  # 02:00 / 10:00 / 21:00 Taiwan
 HARVEST_MINUTE = 0
+SCHEDULED_SLOTS = {2: 1, 10: 2, 21: 3}  # 02:00 -> 01, 10:00 -> 02, 21:00 -> 03
 
 
-async def _job() -> None:
-    await run_daily_batch()
+async def _job(slot: int) -> None:
+    await run_daily_batch(slot=slot)
 
 
 def build_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=HARVEST_TZ)
-    scheduler.add_job(
-        _job,
-        CronTrigger(hour=HARVEST_HOURS, minute=HARVEST_MINUTE, timezone=HARVEST_TZ),
-        id="daily_harvest",
-        max_instances=1,  # never overlap batches
-        coalesce=True,  # if we missed a fire, run once, not N times
-    )
+    for hour, slot in SCHEDULED_SLOTS.items():
+        scheduler.add_job(
+            _job,
+            CronTrigger(hour=hour, minute=HARVEST_MINUTE, timezone=HARVEST_TZ),
+            id=f"harvest_slot_{slot}",
+            args=[slot],
+            max_instances=1,  # never overlap the same slot
+            coalesce=True,  # if we missed a fire, run once, not N times
+        )
     return scheduler
 
 
 async def _run_forever() -> None:
     scheduler = build_scheduler()
     scheduler.start()
-    print(
-        f"[mes.schedule] harvest scheduled at "
-        f"{HARVEST_HOURS}:{HARVEST_MINUTE:02d} {HARVEST_TZ} (三批/日)"
-    )
+    times = ", ".join(f"{h:02d}:{HARVEST_MINUTE:02d}->-{s:02d}" for h, s in SCHEDULED_SLOTS.items())
+    print(f"[mes.schedule] harvest scheduled {HARVEST_TZ}: {times} (三批/日)")
     try:
         await asyncio.Event().wait()  # keep the event loop alive
     finally:

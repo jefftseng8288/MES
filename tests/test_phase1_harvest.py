@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from mes.config import get_settings
 from mes.ingest import ingest_inferred_domain_failure, ingest_inferred_domain_success, ingest_seed
-from mes.pipeline import HealthReport, compute_health_for_batch
+from mes.pipeline import HealthReport, _resolve_batch_id, compute_health_for_batch
 
 _BATCH = "2026-07-15-01"
 
@@ -61,6 +61,18 @@ def test_shortfall_flagged_when_actual_below_requested() -> None:
 def test_empty_batch_pct_is_dash() -> None:
     r = HealthReport.from_statuses(_BATCH, requested=30, statuses=[])
     assert r._pct(0) == "—"
+
+
+async def test_batch_id_scheduled_slot_is_fixed(session: AsyncSession) -> None:
+    # A given slot always maps to the same -0N, regardless of DB contents.
+    assert await _resolve_batch_id(session, "2099-02-02", 1) == "2099-02-02-01"
+    assert await _resolve_batch_id(session, "2099-02-02", 2) == "2099-02-02-02"
+    assert await _resolve_batch_id(session, "2099-02-02", 3) == "2099-02-02-03"
+
+
+async def test_batch_id_manual_starts_at_04(session: AsyncSession) -> None:
+    # Manual (slot=None) reserves 1~3 for scheduled slots, so first manual = -04.
+    assert await _resolve_batch_id(session, "2099-02-03", None) == "2099-02-03-04"
 
 
 async def test_compute_health_for_batch_counts_by_batch_id(session: AsyncSession) -> None:
