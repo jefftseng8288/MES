@@ -66,7 +66,7 @@ def _obs(entity_id: uuid.UUID, **overrides: Any) -> ObservationLog:
         "confidence": "certain",
         "status": "observed",
         "crawler_version": "testhash",
-        "batch_id": "2026-07-15-01",
+        "batch_id": "2099-01-01-01",  # sentinel year: never collides with real batches
     }
     base.update(overrides)
     return ObservationLog(**base)
@@ -170,7 +170,7 @@ async def test_observation_entity_id_not_null_rejected(session: AsyncSession) ->
                 "(observation_id, entity_id, feature, value_type, source, producer, "
                 " observed_at, confidence, status, batch_id) "
                 "VALUES (:oid, NULL, 'product_count', 'number', 'products_json', "
-                " 'mes_crawler_v1', now(), 'certain', 'fetch_failed', '2026-07-15-01')"
+                " 'mes_crawler_v1', now(), 'certain', 'fetch_failed', '2099-01-01-01')"
             ),
             {"oid": uuid.uuid4()},
         )
@@ -423,10 +423,10 @@ async def test_knowledge_producer_null_rejected(session: AsyncSession) -> None:
 
 async def test_batch_id_written_and_readable(session: AsyncSession) -> None:
     store = await _make_store(session)
-    obs = _obs(store.entity_id, batch_id="2026-07-15-02")
+    obs = _obs(store.entity_id, batch_id="2099-01-01-02")
     session.add(obs)
     await session.commit()
-    assert obs.batch_id == "2026-07-15-02"
+    assert obs.batch_id == "2099-01-01-02"
 
 
 async def test_batch_id_null_rejected(session: AsyncSession) -> None:

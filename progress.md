@@ -6,6 +6,14 @@
 
 ---
 
+## 2026-07-15(早)— 首個乾淨排程批(02:00)+ 測試批號 sentinel 化 + 污染標記
+
+- **測試批號改 sentinel:** 測試 fixture 原硬編 `2026-07-15-01` 等真實日期批號,pytest 一跑就往 dev DB 寫,**正好撞上真實排程 02:00 槽位**。改全部測試批號為 `2099-*`(sentinel 年份,永不撞真實 20xx 排程)。(test_phase1b `_obs` / raw INSERT、test_phase1c `_BATCH`、test_phase1_harvest `_BATCH`。)
+- **標記已污染資料(Jeff:標記即可、不刪):** `2026-07-15-01` 內混了 **81 筆**測試殘留(全在 13:00 UTC;真實批全在 18:00 UTC)。一次性 dev 維護:暫 `DISABLE TRIGGER observation_log_no_update` → 把那 81 筆 batch_id 改標為 `2099-01-01-01`(隔離)→ `ENABLE`(已復原)。**技術點:** `docker exec` 要加 `-i` 才會把 heredoc SQL 餵進 psql(第一次沒加 → UPDATE 沒跑)。標記後 `2026-07-15-01` 只剩真實 30 seed + 30 inferred。
+- **首個乾淨排程批 2026-07-15-01(02:00 台灣):** 30 筆 · **observed 29(97%)/ not_found 0 / fetch_failed 1(3%)** —— 生產 20–150s 間隔下 02:00 時段 DDG 基本沒事(僅 1 筆瞬時 fetch_failed)。
+- **可用比例(眼看評估,非人工核實):** 29 個 observed domain 中,**可用(疑似真店家官網)19、不可用 10**(shop.app×3、duckduckgo.com、shopify.dev、ecomscout/retailbrew/storeverify/studocu/webinopoly)。→ **可用 ≈ 19/30 = 63%(佔全批)、19/29 = 66%(佔 observed)**。這再次印證 observed(限流健康)≠ 可用(domain 對不對);可用性判斷屬未來上層元特徵評估,不在抓取層做。
+- **測試:** `pytest` 58 passed;ruff/mypy 綠。核心未動。**測試檔改動待 commit;污染標記是 dev DB 資料維護(不進版控)。**
+
 ## 2026-07-14(深夜)— 批號改固定槽位語義(-01/-02/-03 = 三排程時段,-04+ = 手動)
 
 - **原「數今天已有幾批 +1」改為固定槽位:** scheduler 拆成三個 job,各帶固定 `slot`(02:00→1、10:00→2、21:00→3),`run_daily_batch(slot=...)` → 批號 `台灣日期-0{slot}`。**手動 `--once`(slot=None)從 -04 起編**(保留 1~3 給排程時段)。**同時段重跑沿用同批號**(append 進該時段當天的桶)。

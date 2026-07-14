@@ -16,7 +16,7 @@ from mes.config import get_settings
 from mes.ingest import ingest_inferred_domain_failure, ingest_inferred_domain_success, ingest_seed
 from mes.pipeline import HealthReport, _resolve_batch_id, compute_health_for_batch
 
-_BATCH = "2026-07-15-01"
+_BATCH = "2099-01-01-01"  # sentinel year: never collides with real scheduled batches
 
 
 @pytest_asyncio.fixture

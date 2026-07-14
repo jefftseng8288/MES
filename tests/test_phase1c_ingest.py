@@ -41,7 +41,7 @@ async def session() -> AsyncGenerator[AsyncSession, None]:
     await engine.dispose()
 
 
-_BATCH = "2026-07-15-01"
+_BATCH = "2099-01-01-01"  # sentinel year: never collides with real scheduled batches
 
 
 def _unique_name() -> str:
