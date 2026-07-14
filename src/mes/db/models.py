@@ -186,6 +186,11 @@ class ObservationLog(Base):
         CheckConstraint(_sql_in("status", STATUSES), name="ck_observation_status"),
         CheckConstraint(_OBS_VALUE_RAW_CHECK, name="ck_observation_value_raw_status"),
         CheckConstraint(_OBS_TYPED_CHECK, name="ck_observation_value_typed"),
+        # batch_id format: YYYY-MM-DD-NN (Taiwan date + 當天批序,≥2 位).
+        CheckConstraint(
+            "batch_id ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2,}$'",
+            name="ck_observation_batch_id",
+        ),
     )
 
     observation_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -213,6 +218,9 @@ class ObservationLog(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     # crawler_version = 執行當時的實體程式碼版本(Git commit SHA-1)。只存 hash,不塞別的。
     crawler_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # batch_id = 這筆觀測由哪一次 run 產生(Provenance 延伸;格式 YYYY-MM-DD-NN)。NOT NULL。
+    # 只在 observation_log(觀測事件屬性);knowledge_state 不加(當前值可能混不同批)。
+    batch_id: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
 class KnowledgeState(Base):

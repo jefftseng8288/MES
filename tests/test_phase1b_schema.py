@@ -66,6 +66,7 @@ def _obs(entity_id: uuid.UUID, **overrides: Any) -> ObservationLog:
         "confidence": "certain",
         "status": "observed",
         "crawler_version": "testhash",
+        "batch_id": "2026-07-15-01",
     }
     base.update(overrides)
     return ObservationLog(**base)
@@ -167,9 +168,9 @@ async def test_observation_entity_id_not_null_rejected(session: AsyncSession) ->
             text(
                 "INSERT INTO observation_log "
                 "(observation_id, entity_id, feature, value_type, source, producer, "
-                " observed_at, confidence, status) "
+                " observed_at, confidence, status, batch_id) "
                 "VALUES (:oid, NULL, 'product_count', 'number', 'products_json', "
-                " 'mes_crawler_v1', now(), 'certain', 'fetch_failed')"
+                " 'mes_crawler_v1', now(), 'certain', 'fetch_failed', '2026-07-15-01')"
             ),
             {"oid": uuid.uuid4()},
         )
@@ -415,3 +416,28 @@ async def test_knowledge_producer_null_rejected(session: AsyncSession) -> None:
     await _expect_rejected(
         session, _ks(store.entity_id, obs.observation_id, producer=None)
     )
+
+
+# --- batch_id contract (Phase 1 three-batches) -------------------------------
+
+
+async def test_batch_id_written_and_readable(session: AsyncSession) -> None:
+    store = await _make_store(session)
+    obs = _obs(store.entity_id, batch_id="2026-07-15-02")
+    session.add(obs)
+    await session.commit()
+    assert obs.batch_id == "2026-07-15-02"
+
+
+async def test_batch_id_null_rejected(session: AsyncSession) -> None:
+    store = await _make_store(session)
+    await _expect_rejected(session, _obs(store.entity_id, batch_id=None))
+
+
+@pytest.mark.parametrize(
+    "bad_batch_id",
+    ["2026-07-15", "20260715-01", "2026-7-15-01", "2026-07-15-1", "batch-1", ""],
+)
+async def test_batch_id_bad_format_rejected(session: AsyncSession, bad_batch_id: str) -> None:
+    store = await _make_store(session)
+    await _expect_rejected(session, _obs(store.entity_id, batch_id=bad_batch_id))

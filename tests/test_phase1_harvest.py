@@ -1,21 +1,22 @@
 """Phase 1 harvest scheduling layer tests.
 
-Health-report math is tested purely (no DB/network). The date-based report is
-tested against a small known batch inserted through the real chain.
+Health-report math is tested purely (no DB/network). The batch report is tested
+against a small known batch inserted through the real chain, keyed by batch_id.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator
-from datetime import UTC, datetime
 
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from mes.config import get_settings
 from mes.ingest import ingest_inferred_domain_failure, ingest_inferred_domain_success, ingest_seed
-from mes.pipeline import HealthReport, compute_health_for_date
+from mes.pipeline import HealthReport, compute_health_for_batch
+
+_BATCH = "2026-07-15-01"
 
 
 @pytest_asyncio.fixture
@@ -30,7 +31,7 @@ async def session() -> AsyncGenerator[AsyncSession, None]:
 def test_three_proportions_computed_separately() -> None:
     # 6 observed, 3 not_found, 1 fetch_failed out of 10.
     statuses = ["observed"] * 6 + ["not_found"] * 3 + ["fetch_failed"]
-    r = HealthReport.from_statuses(datetime.now(UTC).date(), requested=30, statuses=statuses)
+    r = HealthReport.from_statuses(_BATCH, requested=30, statuses=statuses)
     assert r.actual == 10
     assert (r.observed, r.not_found, r.fetch_failed) == (6, 3, 1)
     assert r._pct(r.observed) == "60%"
@@ -38,9 +39,10 @@ def test_three_proportions_computed_separately() -> None:
     assert r._pct(r.fetch_failed) == "10%"
 
 
-def test_report_never_merges_into_single_success_rate() -> None:
+def test_report_shows_batch_id_and_never_merges_into_success_rate() -> None:
     statuses = ["observed", "not_found", "fetch_failed"]
-    text = HealthReport.from_statuses(datetime.now(UTC).date(), 3, statuses).format()
+    text = HealthReport.from_statuses(_BATCH, 3, statuses).format()
+    assert _BATCH in text  # report is keyed by batch_id
     # Each status has its own proportion line (three separate percentages).
     for label in ("observed", "not_found", "fetch_failed"):
         assert f"{label}" in text
@@ -51,34 +53,33 @@ def test_report_never_merges_into_single_success_rate() -> None:
 
 
 def test_shortfall_flagged_when_actual_below_requested() -> None:
-    r = HealthReport.from_statuses(datetime.now(UTC).date(), requested=30, statuses=["observed"])
+    r = HealthReport.from_statuses(_BATCH, requested=30, statuses=["observed"])
     assert r.actual < r.requested
     assert "供給不足" in r.format()
 
 
 def test_empty_batch_pct_is_dash() -> None:
-    r = HealthReport.from_statuses(datetime.now(UTC).date(), requested=30, statuses=[])
+    r = HealthReport.from_statuses(_BATCH, requested=30, statuses=[])
     assert r._pct(0) == "—"
 
 
-async def test_compute_health_for_date_counts_todays_inferred_domain(
-    session: AsyncSession,
-) -> None:
-    # Insert one of each status through the real chain, all dated "now".
-    today = datetime.now(UTC).date()
-    before = await compute_health_for_date(session, today)
+async def test_compute_health_for_batch_counts_by_batch_id(session: AsyncSession) -> None:
+    # Use a batch_id unlikely to collide; delta before/after handles repeat runs.
+    batch = "2099-01-01-01"
+    before = await compute_health_for_batch(session, batch)
 
-    s1 = await ingest_seed(session, f"Harvest Obs {uuid.uuid4().hex[:6]}")
+    s1 = await ingest_seed(session, f"Harvest Obs {uuid.uuid4().hex[:6]}", batch_id=batch)
     await ingest_inferred_domain_success(
-        session, s1, raw_url="https://ex-obs.com/", domain="ex-obs.com"
+        session, s1, raw_url="https://ex-obs.com/", domain="ex-obs.com", batch_id=batch
     )
-    s2 = await ingest_seed(session, f"Harvest NF {uuid.uuid4().hex[:6]}")
-    await ingest_inferred_domain_failure(session, s2, status="not_found")
-    s3 = await ingest_seed(session, f"Harvest FF {uuid.uuid4().hex[:6]}")
-    await ingest_inferred_domain_failure(session, s3, status="fetch_failed")
+    s2 = await ingest_seed(session, f"Harvest NF {uuid.uuid4().hex[:6]}", batch_id=batch)
+    await ingest_inferred_domain_failure(session, s2, status="not_found", batch_id=batch)
+    s3 = await ingest_seed(session, f"Harvest FF {uuid.uuid4().hex[:6]}", batch_id=batch)
+    await ingest_inferred_domain_failure(session, s3, status="fetch_failed", batch_id=batch)
     await session.commit()
 
-    after = await compute_health_for_date(session, today)
+    after = await compute_health_for_batch(session, batch)
     assert after.observed - before.observed == 1
     assert after.not_found - before.not_found == 1
     assert after.fetch_failed - before.fetch_failed == 1
+    assert after.batch_id == batch

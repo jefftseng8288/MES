@@ -35,10 +35,13 @@ observation {
   confidence         -- 'certain' | 'inferred' | 'estimated'(見第四節)
   status             -- 'observed' | 'fetch_failed' | 'not_found'(見第三節)
   crawler_version    -- 執行當時的 Git commit SHA-1(只存 hash,見第七節),nullable
+  batch_id           -- 這筆觀測由哪一次 run 產生,NOT NULL(格式 YYYY-MM-DD-NN,見下)
 }
 ```
 
-> 註:value 欄於 2026-07-11 Phase 1-B 實作階段細化為 discriminated union(單一 `value_normalized` 欄 → 依 `value_type` 分流的 typed 欄 value_text / value_number / value_boolean / value_json / value_entity_id)。另 2026-07-11 Phase 1-C 加入 `producer` 欄。皆為欄位實作細化,非設計變更,版號不動。
+> 註:value 欄於 2026-07-11 Phase 1-B 實作階段細化為 discriminated union(單一 `value_normalized` 欄 → 依 `value_type` 分流的 typed 欄 value_text / value_number / value_boolean / value_json / value_entity_id)。另 2026-07-11 Phase 1-C 加入 `producer` 欄、2026-07-14 加入 `batch_id` 欄。皆為欄位實作細化,非設計變更,版號不動。
+
+**`batch_id`(Provenance 延伸,2026-07-14 加入)。** 記錄「這筆觀測是哪一次 run(哪一批)產生的」——除了 producer(哪個方法)/ source(哪個管道)/ crawler_version(哪版程式碼),再加「哪一批」。格式 **`YYYY-MM-DD-NN`**(台灣日期 + 當天批序,例 `2026-07-15-01` / `-02` / `-03`),人讀友好、可排序、同日多批清楚分開;DB 層 **NOT NULL + CHECK 格式約束**。**只加在 `observation_log`**(批號是「觀測事件」屬性);**不加 `knowledge_state`**——後者是當前值物化,其值可能來自不同批,批號對它語義不清。健康報告按 batch_id 呈現三比例。
 
 五個必答問題的對應:觀測了什麼(feature)/ 值(value_*)/ 怎麼觀測到(source)/ 何時(observed_at)/ 多可信(confidence)。加上歸屬(entity_id)與狀態(status)。
 

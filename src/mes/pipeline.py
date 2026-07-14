@@ -4,9 +4,10 @@ This wraps the EXISTING double-domino write chain (scrape -> infer -> ingest) in
 daily batch runner and an honest health report. It does NOT change the core chain,
 three-value semantics, producer/source, Append-Only, or CHECK contracts.
 
-Design intent: the goal is NOT "harvest many stores", it is "run one batch a day,
-steadily, with every batch's outcome seen honestly". The health report reports THREE
-proportions separately and never merges them into one "success rate" — collapsing
+Design intent: the goal is NOT "harvest many stores", it is "run batches steadily,
+with every batch's outcome seen honestly". Now three batches/day (02:00/10:00/21:00
+Taiwan) to test whether the daily total holds against DDG. The health report reports
+THREE proportions separately and never merges them into one "success rate" — collapsing
 not_found (a market fact: dead stores) with fetch_failed (us being rate-limited)
 would produce a false signal on a batch full of dead seeds. That is "失敗不偽裝"
 extended to the health dashboard.
@@ -17,11 +18,12 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
-from sqlalchemy import Date, cast, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from mes.config import get_settings
@@ -36,6 +38,13 @@ from mes.ingest import (
 from mes.normalize import seed_key
 from mes.scrape import fetch_review_page, parse_store_names
 
+# Taipei tz for batch_id dating — all three of a Taiwan-day's batches (02:00/10:00/
+# 21:00 TW) share the same YYYY-MM-DD prefix, numbered -01/-02/-03 in fire order.
+_TAIPEI = ZoneInfo("Asia/Taipei")
+
+# batch_size, delay range, and batches/day are all PROVISIONAL values pending real-load
+# correction — NOT verified safe baselines. Three batches/day is a gentle way to raise
+# the daily total (90 DDG queries) and let real fetch_failed tell us if it holds.
 BATCH_SIZE = 30
 
 # Per-seed random delay between inference calls. 20–150s is a DELIBERATELY CONSERVATIVE
@@ -58,9 +67,9 @@ LOG_PATH = Path("logs/harvest_health.log")
 
 @dataclass(frozen=True)
 class HealthReport:
-    """Honest three-proportion health report for one daily batch."""
+    """Honest three-proportion health report for one batch (keyed by batch_id)."""
 
-    day: date
+    batch_id: str  # YYYY-MM-DD-NN, which run produced this batch
     requested: int  # how many seeds we wanted (BATCH_SIZE)
     actual: int  # how many we actually processed (may be < requested if Loox ran dry)
     observed: int  # inference succeeded -> a domain
@@ -68,9 +77,9 @@ class HealthReport:
     fetch_failed: int  # rate-limited / system couldn't run (THE dial that says "adjust?")
 
     @classmethod
-    def from_statuses(cls, day: date, requested: int, statuses: list[str]) -> HealthReport:
+    def from_statuses(cls, batch_id: str, requested: int, statuses: list[str]) -> HealthReport:
         return cls(
-            day=day,
+            batch_id=batch_id,
             requested=requested,
             actual=len(statuses),
             observed=statuses.count("observed"),
@@ -84,7 +93,7 @@ class HealthReport:
     def format(self) -> str:
         lines = [
             "===== MES 撈取健康報告 (Harvest Health) =====",
-            f"日期 (observed_at date): {self.day.isoformat()}",
+            f"批號 (batch_id): {self.batch_id}",
             f"批次筆數: {self.actual} / 目標 {self.requested}"
             + ("  ⚠️ Loox Seed 供給不足,見說明" if self.actual < self.requested else ""),
             "",
@@ -98,6 +107,8 @@ class HealthReport:
             "",
             "判讀:fetch_failed 比例是判斷『該不該調整節奏』的主要訊號。",
             "      not_found 高只代表這批 Seed 死店多,不代表系統要調整。",
+            "      一天三批(-01/-02/-03):比較同日『越晚的批 fetch_failed 是否越高』,",
+            "      = 判斷『一天總量是否觸發累積限流』的關鍵訊號。",
         ]
         if self.actual < self.requested:
             lines.append(
@@ -107,6 +118,21 @@ class HealthReport:
             )
         lines.append("=" * 44)
         return "\n".join(lines)
+
+
+async def _next_batch_id(session: AsyncSession, day_str: str) -> str:
+    """Next batch_id for a Taiwan date: 'YYYY-MM-DD-NN', NN = existing max for that day + 1.
+
+    Self-contained: derives the sequence by looking at what's already in the DB for that
+    day, so restarts / manual --once / the three scheduled runs each get the right number.
+    """
+    rows = await session.execute(
+        select(ObservationLog.batch_id)
+        .where(ObservationLog.batch_id.like(f"{day_str}-%"))
+        .distinct()
+    )
+    seqs = [int(b.rsplit("-", 1)[1]) for (b,) in rows.all()]
+    return f"{day_str}-{max(seqs, default=0) + 1:02d}"
 
 
 async def _gather_new_store_names(
@@ -170,21 +196,25 @@ async def run_daily_batch(
         engine = create_async_engine(get_settings().database_url)
         session_maker = async_sessionmaker(bind=engine, expire_on_commit=False)
     statuses: list[str] = []
+    batch_id = ""
     try:
         async with session_maker() as session:
+            day_str = datetime.now(_TAIPEI).date().isoformat()
+            batch_id = await _next_batch_id(session, day_str)
             names = await _gather_new_store_names(session, batch_size, page_sleep=page_sleep)
             for i, name in enumerate(names):
-                seed = await ingest_seed(session, name)
+                seed = await ingest_seed(session, name, batch_id=batch_id)
                 await session.commit()
                 result = infer_domain(name)
                 if result.status == "observed" and result.domain and result.raw_url:
                     await ingest_inferred_domain_success(
                         session, seed, raw_url=result.raw_url, domain=result.domain,
-                        producer=result.producer,
+                        producer=result.producer, batch_id=batch_id,
                     )
                 else:
                     await ingest_inferred_domain_failure(
-                        session, seed, status=result.status, producer=result.producer
+                        session, seed, status=result.status,
+                        producer=result.producer, batch_id=batch_id,
                     )
                 await session.commit()
                 statuses.append(result.status)
@@ -194,7 +224,7 @@ async def run_daily_batch(
         if engine is not None:
             await engine.dispose()
 
-    report = HealthReport.from_statuses(datetime.now(UTC).date(), batch_size, statuses)
+    report = HealthReport.from_statuses(batch_id, batch_size, statuses)
     if emit:
         _emit(report)
     return report
@@ -209,24 +239,23 @@ def _emit(report: HealthReport) -> None:
         fh.write(text + "\n\n")
 
 
-async def compute_health_for_date(session: AsyncSession, day: date) -> HealthReport:
-    """Re-derive a day's health report from the DB (batch = observed_at date).
+async def compute_health_for_batch(session: AsyncSession, batch_id: str) -> HealthReport:
+    """Re-derive a batch's health report from the DB by batch_id (for review/comparison).
 
-    Used for next-day review of a past batch. In production one batch runs per day,
-    so this equals that day's batch.
+    To compare a Taiwan-day's three batches, call this for '<date>-01', '-02', '-03'.
     """
     rows = await session.execute(
         select(ObservationLog.status, func.count())
         .where(
             ObservationLog.feature == FEATURE_INFERRED_DOMAIN,
-            cast(ObservationLog.observed_at, Date) == day,
+            ObservationLog.batch_id == batch_id,
         )
         .group_by(ObservationLog.status)
     )
     counts = {status: n for status, n in rows.all()}
     total = sum(counts.values())
     return HealthReport(
-        day=day,
+        batch_id=batch_id,
         requested=total,
         actual=total,
         observed=counts.get("observed", 0),

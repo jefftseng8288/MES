@@ -6,6 +6,25 @@
 
 ---
 
+## 2026-07-14(晚)— 改一天三批 + 新增 batch_id 欄 + 既有資料回填
+
+- **改一天三批:** `schedule.py` 由單批改 `CronTrigger(hour="2,10,21", timezone="Asia/Taipei")` → **台灣 02:00 / 10:00 / 21:00** 各跑一批(分散 8h/11h/5h,測「一天總量 90 次 DDG」而非短時爆量)。已驗證下三次觸發 = 台灣 21:00 → 隔日 02:00 → 10:00。daemon 已重載跑新 code(新 PID;今晚 21:00 台灣自然跑第一個三批之一)。**未硬跑整批**(DDG 狀態未知)。
+- **新增 `batch_id` 欄(observation_log,NOT NULL + 格式 CHECK):** 格式 `YYYY-MM-DD-NN`(台灣日期 + 當天批序,例 `2026-07-15-01`)。批號由 `run_daily_batch` 依「台灣日期 + DB 既有同日批數 +1」自動產生(self-contained,重啟/--once/三批各自拿對序號)。**只加 observation_log,不加 knowledge_state**(當前值可能混不同批,批號語義不清)。批號是 Provenance 延伸(producer/source/crawler_version 之外再加「哪一批」)。
+- **既有資料保留 + 回填(不清除):** migration `2e13ecff13c6` 加欄後,依每列 `observed_at`(台灣日期 + >10min 間隔分群)回填 batch_id。**技術點:** observation_log 有 Append-Only trigger 擋 UPDATE → 在 migration 內 `DISABLE TRIGGER observation_log_no_update` 回填後 `ENABLE`,不走應用層 UPDATE。回填結果:8 個批號,那批乾淨的 30 筆(02:00 台灣 07-14)正確歸 `2026-07-14-01`;0 筆 NULL;trigger 已復原(both enabled)。
+- **健康報告改按批號:** `HealthReport` 以 `batch_id` 為鍵,`compute_health_for_date` → `compute_health_for_batch`;報告標「批號」+ 三比例分開 + 提示「比較同日越晚的批 fetch_failed 是否越高」(判斷一天總量累積限流)。
+- **改的檔:** `schedule.py` / `pipeline.py` / `ingest.py`(三函式加 `batch_id`)/ `models.py`(batch_id 欄+CHECK)/ 新 migration / 三個測試檔 / `docs/MES_Observation_Schema_v1.md` / task_plan / findings。核心(scrape/infer/雙骨牌/三值/producer/Append-Only/value CHECK)未動。
+- **測試:** `pytest` **56 passed**(+8:batch_id 寫入/NULL 拒/格式 CHECK 拒/按批號報告);ruff/mypy 綠;migration down→up 回滾通過。
+- **暫定值提醒:** batch size=30 / 間隔 20–150 / 一天三批,皆為待真實負載修正的暫定值,非安全基準。
+- **未 commit。**
+
+## 2026-07-14 — 第一批生產批(排程自動跑)+ timezone 修正 + 黑名單決策
+
+- **第一批自動跑了,結果乾淨:** 30 筆 · observed **29(97%)** · not_found **1(3%)** · fetch_failed **0(0%)**。DDG 冷卻後,20–150s 隨機間隔跑 30 筆**零限流** → 生產間隔可行。唯一 not_found:`Rocky Road Designs`。
+- **但跑錯時間(已修):** 這批實際在 **18:00 UTC 07-13 = 02:00 台灣 07-14** 跑,不是意圖的 10:00 台灣。根因:預建的 `CronTrigger` 不繼承 scheduler 的 `timezone="UTC"`,抓了系統本地時區 Asia/Taipei,使 `hour=2` 變「02:00 台灣」。**修法:** trigger 明確帶 `timezone="Asia/Taipei"` + `hour=10`;已重載 daemon(新 PID),驗證下次觸發 = **2026-07-15 10:00 台灣(02:00 UTC)**。(詳見 findings 的 CronTrigger 時區教訓。)
+- **撈資料揭露的真相:observed ≠ 抓對。** 把 29 筆 domain 攤開,~13 筆抓錯(`shop.app`、`techtic.com`、`hulkapps.com`、`n8n.io`、`marketwatch.com` 等),真實命中率約 5 成。健康報告的 observed 量的是「限流/系統健康」,不是「domain 精確度」;且該批 confidence 全為 `inferred`(誠實標記猜的)。非報告說謊,是兩個維度。
+- **黑名單:不採用(Jeff 定案)。** 加黑名單濾掉 `shop.app` 等 = 入口丟棄 = 在觀測層做判斷,違反「抓取不判斷」/ P2 中立。抓取層照實記錄推論到什麼,可信度裁決留給未來上層(Insight/Hypothesis),且待**累積夠錯誤 pattern** 後再設計,不預先拍腦袋。(既有 `_BLACKLIST` 是否退場一併留待未來重審。)
+- **改的檔:** `src/mes/schedule.py`(timezone 明確化)、`findings.md`(3 條)、`progress.md`。**未 commit。**
+
 ## 2026-07-13 — Phase 1 每日撈取排程 + 撈取健康報告(通往 7 天驗收)
 
 - **建的檔(核心鏈路未動,只在外面包一層):** `src/mes/pipeline.py`(`run_daily_batch` 批次執行 + `HealthReport` 三比例報告 + `compute_health_for_date` 隔天回看)、`src/mes/schedule.py`(APScheduler daemon,cron 09:00 UTC,`--once` 手動觸發)、`tests/test_phase1_harvest.py`(5 測試)。改:`pyproject.toml`(+apscheduler、mypy 忽略其 stubs)、`.gitignore`(+`logs/`)。

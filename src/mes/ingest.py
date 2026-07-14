@@ -68,12 +68,14 @@ async def ingest_seed(
     session: AsyncSession,
     raw_store_name: str,
     *,
+    batch_id: str,
     source_page_label: str = "Loox Review Page",
 ) -> Entity:
     """骨牌一: upsert the Seed entity and append an observed_on_app_store observation.
 
     The Seed entity dedupes on canonical_key ('seed:' + normalized name); the
-    observation is Append-Only (re-seeing a name appends a new row).
+    observation is Append-Only (re-seeing a name appends a new row). ``batch_id``
+    records which run produced it (Provenance 延伸).
     """
     seed, _ = await _get_or_create_entity(
         session, "store_name_seed", seed_key(raw_store_name)
@@ -90,6 +92,7 @@ async def ingest_seed(
             observed_at=_now(),
             confidence="certain",
             status="observed",
+            batch_id=batch_id,
         )
     )
     await session.flush()
@@ -102,6 +105,7 @@ async def ingest_inferred_domain_success(
     *,
     raw_url: str,
     domain: str,
+    batch_id: str,
     producer: str = PRODUCER_DUCKDUCKGO,
 ) -> Entity:
     """骨牌二 情況 A: create/get the store entity and log the inferred_domain (inferred)."""
@@ -118,6 +122,7 @@ async def ingest_inferred_domain_success(
             observed_at=_now(),
             confidence="inferred",
             status="observed",
+            batch_id=batch_id,
         )
     )
     await session.flush()
@@ -129,6 +134,7 @@ async def ingest_inferred_domain_failure(
     seed: Entity,
     *,
     status: str,
+    batch_id: str,
     producer: str = PRODUCER_DUCKDUCKGO,
 ) -> ObservationLog:
     """骨牌二 情況 B: log a failed inference (fetch_failed | not_found), all values NULL.
@@ -148,6 +154,7 @@ async def ingest_inferred_domain_failure(
         observed_at=_now(),
         confidence="inferred",
         status=status,
+        batch_id=batch_id,
     )
     session.add(obs)
     await session.flush()

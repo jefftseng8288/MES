@@ -105,18 +105,21 @@
 >
 > **schema 細化(2026-07-11,版號不動,已物理落地 DB):** (1) source 受控清單加 `web_search`(inferred_domain 不再假記為 html_page);(2) 新增 `producer` 欄(observation_log + knowledge_state,NOT NULL + CHECK,三值 mes_crawler_v1 / duckduckgo_v1 / manual_v1);(3) crawler_version 歸位為純 git hash(不再塞 duckduckgo_v1)。三欄分工:source=管道 / producer=方法模型 / crawler_version=程式碼版本。新增 migration `d9eb673e28aa`(down→up 於空表回滾通過)。dev 資料選擇清空重跑(TRUNCATE 繞過 Append-Only trigger → 完整鏈路重建 → 重跑 live)。
 
-### E. 每日撈取排程 + 撈取健康報告(通往 7 天驗收)— ✅ 機制完成,7 天實跑待啟動
+### E. 撈取排程(一天三批)+ 撈取健康報告 + 批號 — ✅ 機制完成,連續天數實跑待累積
 
-- [x] 每日排程器(`src/mes/schedule.py`,APScheduler,cron 09:00 UTC,`max_instances=1`/`coalesce`;`--once` 可手動觸發一批)
-- [x] 每日一批 = 30 筆 Seed(`src/mes/pipeline.py::run_daily_batch`),沿用既有雙骨牌鏈路,核心未動
-- [x] 節流:每筆之間 **20–150 秒隨機** sleep(隨機為硬性要求,防機器人識別;跨度 130 秒刻意拉寬,更不規則、更像人類);此區間為「待一週回饋後調整」的保守起點。30×~85s ≈ 42 分鐘/批
-- [x] Seed 去重仍生效:只取「未撈過的新 Store Name」,不重複撈同店湊數;供給不足如實回報(`actual < requested`)
-- [x] 撈取健康報告:每批印出 + 寫入 `logs/harvest_health.log`,**三比例分開**(observed / not_found / fetch_failed),不合併成單一「成功率」;判讀說明標明 fetch_failed 為「該不該調整節奏」主儀表
-- [x] 批次界定用 `observed_at` 日期(不加 run_id 到核心表);`compute_health_for_date` 供隔天回看
-- [ ] **連續 7 天實跑**(每天一批、每天一份報告,累積 7 個 fetch_failed 資料點)— 尚未開始
+- [x] 排程器(`src/mes/schedule.py`,APScheduler,**一天三批 02:00 / 10:00 / 21:00 台灣**,`CronTrigger(hour="2,10,21", timezone="Asia/Taipei")` 明確帶時區;`max_instances=1`/`coalesce`;`--once` 手動觸發)
+- [x] 時區修正:trigger 明確 `Asia/Taipei`(不依賴系統時區繼承);已驗證三批觸發 = 台灣 02:00/10:00/21:00
+- [x] 每批 = 30 筆未撈過的 Loox Seed(`run_daily_batch`),沿用既有雙骨牌鏈路,核心未動;三批分散(8h/11h/5h)測「一天總量(90 次 DDG)」而非短時爆量
+- [x] 節流:每筆之間 **20–150 秒隨機** sleep(隨機為硬性要求;跨度 130 秒拉寬);保守起點,待真實負載回饋調整。30×~85s ≈ 42 分鐘/批
+- [x] **批號 `batch_id`(observation_log,NOT NULL + 格式 CHECK)**:格式 `YYYY-MM-DD-NN`(台灣日期+當天批序);只加 observation_log、不加 knowledge_state;既有資料以 migration 依 `observed_at`(台灣日期 + >10min 分群)回填,不清除(繞過 Append-Only trigger)
+- [x] Seed 去重仍生效:只取未撈過的新 Store Name;供給不足如實回報(`actual < requested`)
+- [x] 撈取健康報告**按批號**:每批印出 + 寫入 `logs/harvest_health.log`,**三比例分開**(observed / not_found / fetch_failed),不合併;判讀標明 fetch_failed 為主儀表,並提示**比較同日越晚的批 fetch_failed 是否越高**(測一天總量的累積限流);`compute_health_for_batch` 供回看
+- [ ] **連續多天三批穩定實跑**(累積 fetch_failed 資料點)— 尚未開始
 - [ ] 第一版不做自動告警/自動退避(先累積經驗,規則成熟再自動化)
 
-> **實測(2026-07-13,縮小驗證):** `pytest` 48 passed(+5 harvest 測試)。手動觸發兩批(間隔刻意縮短以快速驗證整條線):第一批 8 筆(間隔 2–5s)→ observed 2(25%)/ not_found 0 / **fetch_failed 6(75%)**;第二批 6 筆(間隔 5–15s)→ **fetch_failed 6(100%)**。連續壓縮間隔猛打 → DuckDuckGo 已對本機硬限流,健康報告**誠實暴露**(未美化成「成功率」把限流藏起來)。雙骨牌仍正確寫入(fetch_failed 全欄 NULL、通過 CHECK)。這強力印證:**壓縮間隔會把井打壞、20–150 秒寬隨機保守起點的必要**;真實三比例要在真實節奏(20–150s)+ DDG 冷卻後,靠一週資料才看得準(對照上一輪首次在較寬有效間隔下曾 5/5 命中)。Loox 供給:各批無短缺;30×7=210 的完整週供給未驗(取決於評論頁翻頁深度,`MAX_PAGES=12` 上限約 120 名/批)。
+> **實測(2026-07-14):** `pytest` **56 passed**(含 batch_id NOT NULL/格式 CHECK、按批號報告);ruff/mypy 綠;migration down→up 回滾通過、Append-Only trigger 回填後已復原。三批觸發時間驗證 = 台灣 02:00/10:00/21:00。daemon 已重載跑新 code(今晚 21:00 台灣自然跑第一個三批)。**未硬跑整批**(DDG 狀態未知,讓它按排程自然跑)。
+> **既有真實批(2026-07-14-01,即上一輪 02:00 台灣那批):** 30 筆 · observed 29(97%)· not_found 1 · fetch_failed 0 —— 20–150s 節奏、冷卻後、零限流,證明生產間隔可行。**註:observed 是「有沒有被限流」的健康指標,非「domain 抓對」;該批攤開約半數 domain 其實抓錯(shop.app 等),精確度屬 inferred_domain 元特徵未來評估,不在此報告範圍。**
+> **暫定值提醒:** batch size=30 / 間隔 20–150 / 一天三批,皆為**待真實負載修正的暫定值**,非已驗證安全基準;一天三批就是要用真實 fetch_failed 測「一天總量」對 DDG 的累積效應。
 
 ### D. 第一版 Feature 範圍(依 Feature Taxonomy v1,9 個)— ⏳ 未開始
 
@@ -135,12 +138,13 @@
 
 ### ✅ 驗收(Acceptance)
 
-**狀態:** ⬜ **未驗收**（排程機制已就緒,7 天實跑尚未啟動）
+**狀態:** 🔄 **驗收中**（三批排程已上線,連續天數重新從「三批穩定跑」起算)
 
-> ⚠️ 工作項目 A / B / C 核心 + E 排程機制已完成並測試通過(`pytest` 48 passed、真連 DB),**但這不等於 Phase 1 驗收通過**。驗收要求「**連續 7 天**每天自動跑、有新增」+「規模累積」——排程器已建好可啟動,但 7 天的實際累積**尚未開始跑**(至今只有縮小驗證與偵察 live run)。**不可因工作 checklist 勾滿就標成通過;要等 7 天真的跑完、由 Jeff 看 fetch_failed 曲線判定。** 啟動 daemon 跑出第一批日報後,此狀態才轉 🔄 驗收中。
+> ⚠️ A / B / C 核心 + E(三批排程 + 批號)已完成並測試通過(`pytest` 56 passed、真連 DB),daemon 已重載跑新 code(今晚 21:00 台灣起自然跑三批)。**這仍不等於驗收通過**:驗收要求「連續多天每天(三批)自動跑、有新增」+「規模累積」,實際累積才剛要開始。**因改為一天三批,連續天數計數重新從第一個「三批穩定跑」的日子起算**,誠實歸零重數。**不可因 checklist 勾滿就標通過;要等連續天數跑滿、Jeff 看 fetch_failed 曲線(尤其同日越晚的批是否越高)判定。**
 
 **驗收條件:**（全部未達成）
-- [ ] 連續 7 天每天自動排程跑,每天都有新增
+- [ ] 連續多天每天三批自動排程跑,每天都有新增(連續天數從三批穩定跑起算)
+- [ ] 觀察同日三批 fetch_failed 趨勢,確認「一天總量(90 次 DDG)」DDG 撐得住
 - [ ] 規模累積(目標約 1000 家店)
 - [ ] 五 metadata 齊全(feature / value / source / observed_at / confidence)+ entity 歸屬正確
 - [ ] Append-Only 沒覆蓋(再次觀測 = 新增帶新 timestamp 的一筆)

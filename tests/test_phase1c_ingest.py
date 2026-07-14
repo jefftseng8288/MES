@@ -41,13 +41,16 @@ async def session() -> AsyncGenerator[AsyncSession, None]:
     await engine.dispose()
 
 
+_BATCH = "2026-07-15-01"
+
+
 def _unique_name() -> str:
     return f"Test Store {uuid.uuid4().hex[:8]}"
 
 
 async def test_domino_one_seed_and_observed_on_app_store(session: AsyncSession) -> None:
     name = _unique_name()
-    seed = await ingest_seed(session, name, source_page_label="Loox Review Page")
+    seed = await ingest_seed(session, name, batch_id=_BATCH, source_page_label="Loox Review Page")
     await session.commit()
 
     assert seed.entity_type == "store_name_seed"
@@ -65,12 +68,14 @@ async def test_domino_one_seed_and_observed_on_app_store(session: AsyncSession) 
     assert obs.confidence == "certain"
     assert obs.source == "html_page"
     assert obs.producer == "mes_crawler_v1"
+    assert obs.batch_id == _BATCH
 
 
 async def test_domino_two_case_a_success(session: AsyncSession) -> None:
-    seed = await ingest_seed(session, _unique_name())
+    seed = await ingest_seed(session, _unique_name(), batch_id=_BATCH)
     store = await ingest_inferred_domain_success(
-        session, seed, raw_url="https://WWW.Example-Store.com/products/", domain="Example-Store.com"
+        session, seed, raw_url="https://WWW.Example-Store.com/products/",
+        domain="Example-Store.com", batch_id=_BATCH,
     )
     await session.commit()
 
@@ -96,8 +101,8 @@ async def test_domino_two_case_a_success(session: AsyncSession) -> None:
 
 @pytest.mark.parametrize("status", ["fetch_failed", "not_found"])
 async def test_domino_two_case_b_failure_all_null(session: AsyncSession, status: str) -> None:
-    seed = await ingest_seed(session, _unique_name())
-    obs = await ingest_inferred_domain_failure(session, seed, status=status)
+    seed = await ingest_seed(session, _unique_name(), batch_id=_BATCH)
+    obs = await ingest_inferred_domain_failure(session, seed, status=status, batch_id=_BATCH)
     await session.commit()
 
     assert obs.feature == FEATURE_INFERRED_DOMAIN
@@ -117,16 +122,16 @@ async def test_domino_two_case_b_failure_all_null(session: AsyncSession, status:
 
 
 async def test_ingest_failure_rejects_bad_status(session: AsyncSession) -> None:
-    seed = await ingest_seed(session, _unique_name())
+    seed = await ingest_seed(session, _unique_name(), batch_id=_BATCH)
     with pytest.raises(ValueError, match="fetch_failed|not_found"):
-        await ingest_inferred_domain_failure(session, seed, status="observed")
+        await ingest_inferred_domain_failure(session, seed, status="observed", batch_id=_BATCH)
 
 
 async def test_seed_dedupe_same_name_one_entity(session: AsyncSession) -> None:
     name = _unique_name()
-    seed1 = await ingest_seed(session, name)
+    seed1 = await ingest_seed(session, name, batch_id=_BATCH)
     await session.commit()
-    seed2 = await ingest_seed(session, name.upper())  # same after normalization
+    seed2 = await ingest_seed(session, name.upper(), batch_id=_BATCH)  # same after normalization
     await session.commit()
 
     assert normalize_seed_name(name) == normalize_seed_name(name.upper())
