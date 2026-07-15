@@ -53,7 +53,11 @@ STATUSES = ("observed", "fetch_failed", "not_found")
 #   mes_crawler_v1 — 直接抓取/讀取的責任主體(observed_on_app_store + 未來 9 個市場特徵)。
 #   duckduckgo_v1  — DuckDuckGo 推論 inferred_domain 的責任主體。
 #   manual_v1      — 人工校正/手動餵入的責任主體。
-PRODUCERS = ("mes_crawler_v1", "duckduckgo_v1", "manual_v1")
+PRODUCERS = ("mes_crawler_v1", "duckduckgo_v1", "manual_v1", "mes_store_crawler_v1")
+
+# Store feature-harvest processing state (Phase 1-D). NOT an observation — a mutable
+# system-internal "to-do" marker. 'pending' 有 domain 待抓 / 'done' 已抓 / 'failed' 戳失敗可重試。
+HARVEST_STATUSES = ("pending", "done", "failed")
 
 # Feature Taxonomy v1 — Market Features: describe the state of a Reality entity.
 # Not CHECK-locked: feature is an intentionally extensible vocabulary (new features
@@ -206,7 +210,10 @@ class ObservationLog(Base):
     value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     value_number: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     value_boolean: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    value_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null: Python None -> SQL NULL (not JSON 'null'), else value_typed CHECK breaks.
+    value_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     value_entity_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("entity.entity_id"), nullable=True
     )
@@ -247,7 +254,10 @@ class KnowledgeState(Base):
     value_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     value_number: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     value_boolean: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    value_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    # none_as_null: Python None -> SQL NULL (not JSON 'null'), else value_typed CHECK breaks.
+    value_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     value_entity_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("entity.entity_id"), nullable=True
     )
@@ -260,6 +270,27 @@ class KnowledgeState(Base):
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     confidence: Mapped[str] = mapped_column(String(16), nullable=False)
     selection_rule_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
+    )
+
+
+class StoreHarvestState(Base):
+    """系統處理狀態(非觀測):某 store 的 9 個市場 feature 抓取進度。
+
+    刻意與 entity 純淨、Append-Only 分離——這是「待處理清單」的系統標記,可自由 UPDATE,
+    不是市場觀測資料。放獨立表(非 entity 加欄)以保持 entity 只作觀測掛載點。
+    """
+
+    __tablename__ = "store_harvest_state"
+    __table_args__ = (
+        CheckConstraint(_sql_in("status", HARVEST_STATUSES), name="ck_harvest_status"),
+    )
+
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entity.entity_id"), primary_key=True
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
     )

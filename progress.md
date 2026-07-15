@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-07-15(深夜)— Phase 1-D:戳店面抓 9 個市場 feature(獨立排程)
+
+- **架構:與 baseline DDG 鏈路分離、獨立。** 新增 `src/mes/harvest.py`:讀「有 domain、待抓」的 store → 戳該店 products.json + 首頁 HTML → 寫 9 feature(掛 store entity)。戳的是各店伺服器/Cloudflare,與 DDG 不同對象、限流獨立、兩鏈路並行不干擾。獨立排程 `store_harvest`(每 3h,≈8 批/日、每批 1–3 家)。
+- **狀態標記放哪(選獨立表,理由):** 新增 `store_harvest_state(entity_id PK, status, updated_at)`,status ∈ pending/done/failed。**選獨立表而非 entity 加欄** —— 保持 entity 只作「觀測掛載點 + 去重鍵」的純淨(P2:entity 不存會變的事實);處理狀態是「系統辨識用、可自由 UPDATE」的東西,與 Append-Only/觀測資料本質不同,放它自己的表最乾淨。排程用 LEFT JOIN 挑「無 state 或 pending/failed」的 store,抓完 upsert done(連不上 failed 可重試)。
+- **9 feature 來源:** products.json(product_count/avg_price/price_range/is_active)+ 首頁 Shopify.* 變數(theme_name/country/language/**currency** —— currency 在 HTML 不在 products.json)+ script 特徵(uses_review_app)。producer=`mes_store_crawler_v1`(擴充 CHECK)。
+- **三值 + confidence 誠實:** 逐 feature 走三值(連不上=fetch_failed / 確認沒有=not_found / 拿到=observed;is_active=false 是 observed 負向觀測非失敗)。confidence:直讀=certain,`uses_review_app`=**inferred**(script 特徵是推斷,可能誤判),products 翻頁不全=estimated。
+- **首次實跑真實 3 家:** flated.co.nz **9/9**(NZ/NZD)、vaniabath.com **9/9**(196 商品、loox)、centricoffee.com **8/9**(uses_review_app 誠實 not_found)。products.json / Shopify.* 結構如探測預期,未被擋。
+- **踩坑(重要):** SQLAlchemy JSONB 欄預設把 Python `None` 存成 **JSON `null`(非 SQL NULL)**,害 `value_json IS NULL` 為 false、打破 value_typed CHECK。修:兩個 value_json 欄加 `JSONB(none_as_null=True)`。(先前測試沒明寫 value_json=None 才沒踩到。)
+- **測試:** `pytest` **70 passed**(+11 harvest);ruff/mypy 綠;migration 已套用(store_harvest_state + producer CHECK)。daemon 已重載跑 4 jobs(3 baseline + store_harvest)。
+- **核心(雙骨牌/三值/producer/Append-Only/batch_id/discriminated union)未動。未 commit。**
+
 ## 2026-07-15(晚)— scraper 擴到五個 review app(解 Loox 供給見底)
 
 - **動機:** 10:00 批(2026-07-15-02)只湊到 **11/30** —— Loox 種子供給在 `MAX_PAGES=12`(約 120 名)範圍內第二天就抽乾(健康報告誠實標「供給不足」;Seed 去重生效、未重複撈同店湊數;DDG 這批 100% 沒事)。

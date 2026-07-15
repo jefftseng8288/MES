@@ -117,16 +117,19 @@ value 欄以兩層 CHECK 把「值容器」鎖成 discriminated union,DB 層強�
 
 | producer | 說明 |
 |---|---|
-| `mes_crawler_v1` | 直接抓取/讀取的責任主體(observed_on_app_store + 未來 9 個市場特徵) |
+| `mes_crawler_v1` | App Store 評論頁抓取的責任主體(observed_on_app_store) |
 | `duckduckgo_v1` | DuckDuckGo 推論 inferred_domain 的責任主體 |
+| `mes_store_crawler_v1` | 戳店面抓取 9 個市場特徵的責任主體(Phase 1-D;products.json + 首頁 HTML) |
 | `manual_v1` | 人工校正/手動餵入的責任主體 |
+
+> 註:`mes_store_crawler_v1` 於 2026-07-15 Phase 1-D 加入(戳店面獨立鏈路)。屬受控清單擴充,已物理落地 CHECK,版號不動。
 
 ### 三欄分工(Provenance 完整且不重疊)
 
 | 欄 | 答的問題 | 值域 |
 |---|---|---|
 | `source` | 透過什麼**管道**觀測到 | html_page / products_json / html_signature / web_search / manual / monitor |
-| `producer` | 這筆值由哪個**方法/模型**產生 | mes_crawler_v1 / duckduckgo_v1 / manual_v1 |
+| `producer` | 這筆值由哪個**方法/模型**產生 | mes_crawler_v1 / duckduckgo_v1 / mes_store_crawler_v1 / manual_v1 |
 | `crawler_version` | 執行當時的**實體程式碼版本** | Git commit SHA-1(只存 hash,不塞別的) |
 
 合起來:「這筆 domain,透過 `web_search` 管道、由 `duckduckgo_v1` 產生、在 git commit `abc1234` 時被固化。」

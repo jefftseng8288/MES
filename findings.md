@@ -99,5 +99,20 @@
 - **供給瓶頸比限流先到:單一 review app 的新種子池會被抽乾——解法是「加來源」而非「撈更兇」(2026-07-15)。**
   改三批後第二天,10:00 批只湊到 11/30——**不是 DDG 限流(這批 100% observed),是 Loox 的「未撈過的新 Store Name」在 `MAX_PAGES=12`(約 120 名)範圍內見底了**。Seed 去重使我們**不重複撈同店湊數**,所以供給一乾就誠實反映成小批(健康報告的 `actual < requested`)。這揭露:**在真實世界,供給上限往往比 DDG 限流上限先撞到**。解法**不是**把單一來源撈更兇(翻更深 = 越舊越不活躍、也更像爬蟲),而是**加來源**:scraper 從只抓 loox 擴到五個 review app(judgeme/yotpo/okendo/stamped),供給立刻放大數倍(實測 page 1 各 app 就湊滿 30,loox 已貢獻 0)。呼應 P6:能力(找新種子)不綁死在單一來源上。**教訓:量能不足時,先問「能不能多接一個來源」,而不是「能不能對現有來源更用力」。**
 
+- **處理狀態 ≠ 觀測資料:store_harvest_state 可自由 UPDATE,與 Append-Only/entity 純淨無關(2026-07-15 Phase 1-D)。**
+  「哪些 store 待抓 feature」是**系統內部的待辦狀態**(pending/done/failed),不是市場觀測。它該可自由 UPDATE(抓完就改 done),與「觀測資料 Append-Only、entity 只作觀測掛載點」的鐵律是**兩回事**。所以放**獨立表** `store_harvest_state`(非在 entity 加欄):entity 保持純淨,狀態有自己的家。判準:一個欄位/表存的是「發生過的觀測事實」(→ Append-Only、不可改)還是「當前的處理進度」(→ 可 UPDATE 的狀態)?兩者要分開,不要把可變狀態塞進不可變的觀測/實體表。
+
+- **戳店面與戳 DDG 是兩條獨立鏈路,限流獨立、可並行(2026-07-15 Phase 1-D)。**
+  baseline(Name→Domain)戳的是 **DuckDuckGo**;feature 抓取戳的是 **各店自己的伺服器/Cloudflare**。不同對象 → 限流計數獨立、失敗互不牽連。所以做成**分離的獨立排程**(baseline 三批/日 vs harvest 每 3h),而非串在同一鏈路——一邊被限流不拖累另一邊,兩邊的節奏各自依自己對象的實況調整。教訓:不同外部依賴的節流/排程要**按「戳的是誰」分開管理**,別混成一條。
+
+- **`uses_review_app` 靠 HTML script 特徵是推斷,標 inferred(不是 certain)(2026-07-15 Phase 1-D)。**
+  9 個 feature 裡 8 個是直讀店家自報(products.json、Shopify.* 變數)→ certain;唯獨 `uses_review_app` 是靠首頁 script/DOM 特徵**比對推斷**「這家在用某 app」——script 可能殘留(裝過已移除)、可能誤判 → 誠實標 **inferred**,如同 inferred_domain。沒命中 signature ≠ 沒裝,只代表「現有 signature library 沒識別到」→ status `not_found` + inferred。**判準同一條:直讀事實=certain,比對/推斷得到的=inferred。**
+
+- **SQLAlchemy JSONB 欄的 `None` 預設是 JSON `null` 不是 SQL NULL,會打破 CHECK(2026-07-15,踩坑)。**
+  ORM 明寫 `value_json=None` 時,SQLAlchemy 的 `JSONB` 型別預設把 Python `None` 存成 **JSON `'null'`(一個非 NULL 的 JSONB 值)**,於是 `value_json IS NULL` 為 **false**,打破 discriminated-union 的 value_typed CHECK(「其餘 typed 欄全 NULL」)。詭異點:同樣的值用 raw SQL / 不明寫該欄 → SQL NULL → 過;ORM 明寫 None → JSON null → 不過(先前測試沒明寫才沒暴露)。修:欄位宣告 `JSONB(none_as_null=True)`,讓 Python None → SQL NULL。教訓:**JSON/JSONB 欄一律設 `none_as_null=True`**,否則「空值」有兩種(SQL NULL vs JSON null)會靜默咬人。
+
 - **外部平台的 URL handle 是歷史遺留,必須實測、不能憑名字猜(2026-07-15)。**
   五個 review app 的 App Store 評論頁 handle 只有 loox=`loox` 直覺;其餘都不等於 app 名:yotpo=`yotpo-social-reviews`、okendo=`okendo-reviews`、**stamped=`product-reviews-addon`**(該 app 原名 Product Reviews Addon,slug 是歷史遺留)。若憑「app 名當 handle」猜,四個裡三個 404。做法:**先打候選 URL 看 200 + 能不能解析出名字,確認了才寫進 `REVIEW_APP_HANDLES`**;selector 則先驗證是 App Store 通用 HTML(五個都用同一條)。再次印證「碰外部世界先探再寫、不憑想像」。
+
+- **驗收驗能力,不卡時間——用「連續 N 天」當驗收會誤判成敗(2026-07-15,範式校正)。**
+  Phase 驗收要回答的是「這個能力做出來了嗎」(是非題),不是「跑了多久」。**用時間・區間(連續 7 天、規模到 1000 家)當驗收,不管 N 設多少都不合理:** 任何有限區間都證不了「持續」,而持續是系統存在就會做的**常態**,不是要達成的目標。更糟的是它會**顛倒成敗判定**——真實案例:Loox 種子池**第一天就抽乾**;若用「連續 7 天有新增」當驗收,會判**失敗**,但那其實是**成功**(系統誠實反映供給見底、並用「加來源(五 app)」解掉)。反過來,若某 7 天剛好沒撞到問題,會把「運氣好」誤判成能力達成。**結論:驗收條件一律改成能力描述(能不能把 Seed 轉成誠實、結構對、可追溯的 Observation),時間・規模移除。時間在 MES 是資料累積的介質,不是成就的度量。** 原則入典於 `CLAUDE.md`。

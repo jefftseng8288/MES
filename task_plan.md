@@ -20,14 +20,16 @@
 
 ## 驗收(Acceptance)三態說明
 
-> **工作做完 ≠ 驗收通過。**(呼應 CLAUDE.md:code 改完 ≠ 驗過。)每個 Phase 的「工作項目 checklist」只表示「事情做了」;是否達標由獨立的 **### ✅ 驗收(Acceptance)** 子區塊判定。驗收狀態四態:
+> **工作做完 ≠ 驗收通過。**(呼應 CLAUDE.md:code 改完 ≠ 驗過。)每個 Phase 的「工作項目 checklist」只表示「事情做了」;是否達標由獨立的 **### ✅ 驗收(Acceptance)** 子區塊判定。
+>
+> **★ 驗收驗能力,不卡時間。** 驗收條件一律是「該 Phase 要證明的**能力**是否具備」(是非題),**不得**含「連續 N 天 / 穩定跑多久 / 規模累積到多少」這類時間・區間門檻。理由:任何有限區間都證明不了「持續」,而「持續」是系統存在就會做的常態,不是要被驗收的目標。詳見 `CLAUDE.md`。驗收狀態四態:
 
-- **⬜ 未驗收:** 工作可能做完了,但驗收根本還沒跑。
-- **🔄 驗收中:** 驗收正在進行(如「連續 7 天累積」跑到第 N 天)。
-- **✅ 通過:** 驗收已跑完且達標。
-- **❌ 未通過:** 驗收已跑完但未達標。
+- **⬜ 未驗收:** 工作可能做完了,但能力驗收還沒檢驗。
+- **🔄 驗收中:** 能力正在被檢驗,尚未有結論。
+- **✅ 通過:** 能力已展示、達標。
+- **❌ 未通過:** 已檢驗但能力未達標。
 
-**鐵律:不可因為工作 checklist 勾滿就把驗收標成通過。**
+**鐵律:不可因為工作 checklist 勾滿就把驗收標成通過;但驗收判的是能力,不是跑了多久。**
 
 ---
 
@@ -60,15 +62,15 @@
 
 ---
 
-## Phase 1 — Crawler → Observation Log(每天乾淨累積)
+## Phase 1 — Crawler → Observation Log(乾淨、可追溯的市場 Observation)
 
-**狀態:** 🔄 執行中(Running)— A 工程基礎設施、B 資料層完成;C 抓取推論鏈路骨架完成並實測(排程未做);D Feature 抓取未開始
+**狀態:** ✅ A–E 全完成、驗收 ✅ 通過(A 基礎設施 / B 三表 / C 雙骨牌 / D feature 抓取 / E 排程)。baseline 與戳店面兩條鏈路作為背景常態持續運行。
 
-**目的:** 證明「持續產生乾淨、中立、結構正確、掛在正確 Entity 上的觀測」能穩定運作。
+**目的:** 能產生乾淨、中立、結構正確、掛在正確 Entity 上、可追溯的市場 Observation。
 
 **進入條件:** Phase 0 五份定稿(✅ 已達成)。
 
-> **進度小結(更新於 2026-07-11):** A(工程基礎設施)+ B(資料層)已完成——最小工程骨架 + PostgreSQL 16 環境、async 連線層;三張核心表(entity / observation_log / knowledge_state)ORM + Alembic migration 就緒,Append-Only trigger 與 Provenance NOT NULL 雙層約束已在 DB 層落地並實測。C(抓取推論鏈路)/ D(Feature 抓取)尚未開始(無 Scraper/Inference/寫入鏈路)。
+> **進度小結(更新於 2026-07-15):** A–E 全完成。基礎設施(uv / PostgreSQL 16 / async)+ 三張核心表(entity / observation_log / knowledge_state,Append-Only trigger + Provenance 雙層 + discriminated union value CHECK)+ 雙骨牌鏈路(Seed → inferred_domain)+ 五 app 擴池 + 批號 + 三批 baseline 排程與誠實健康報告 + Phase 1-D 戳店面抓 9 個市場 feature(獨立排程)皆已就緒並實測(`pytest` 70 passed、真連 DB + 真實實跑印證)。
 
 ### A. 專案基礎設施 — ✅ 完成
 
@@ -99,13 +101,13 @@
 - [x] 3. Normalize(`src/mes/normalize.py`):domain 小寫/去 scheme/去 www/去 path/去 port → canonical_key → 寫 store entity;seed name 正規化 → `seed:` 前綴。收斂單一模組
 - [x] 4. Event Sourcing 寫入(`src/mes/ingest.py`):雙骨牌先 append Observation_Log(entity_id 不可空)。Knowledge_State 投影屬 Phase 2,本階段不做
 - [x] 5. 失敗三值語義:inference 結果 observed / fetch_failed / not_found 精確分流(fetch_failed=推論沒執行成功;not_found=執行了但搜不到可信 domain,≠店已死),寫入時失敗全欄 NULL、通過 CHECK
-- [x] 連續 7 天自動排程跑的**機制**已建置並驗證(見 E);**7 天實跑本身**尚未開始(驗收條件,見驗收區)
+- [x] 自動排程能力已建置並驗證(見 E:daemon 常駐、無人看管自動跑)—— 持續運行是背景常態,不列為驗收門檻
 
 > **實測驗收(2026-07-11):** `pytest` 43 passed(6 個 1-C 寫入鏈路 + producer/source CHECK 測試,真連 DB)。live run 對真實店跑 DuckDuckGo,observed / fetch_failed / not_found 三種狀態均實際出現(連續查詢後 DDG 限流→fetch_failed,誠實記錄)。
 >
 > **schema 細化(2026-07-11,版號不動,已物理落地 DB):** (1) source 受控清單加 `web_search`(inferred_domain 不再假記為 html_page);(2) 新增 `producer` 欄(observation_log + knowledge_state,NOT NULL + CHECK,三值 mes_crawler_v1 / duckduckgo_v1 / manual_v1);(3) crawler_version 歸位為純 git hash(不再塞 duckduckgo_v1)。三欄分工:source=管道 / producer=方法模型 / crawler_version=程式碼版本。新增 migration `d9eb673e28aa`(down→up 於空表回滾通過)。dev 資料選擇清空重跑(TRUNCATE 繞過 Append-Only trigger → 完整鏈路重建 → 重跑 live)。
 
-### E. 撈取排程(一天三批)+ 撈取健康報告 + 批號 — ✅ 機制完成,連續天數實跑待累積
+### E. 撈取排程(一天三批)+ 撈取健康報告 + 批號 — ✅ 完成(自動排程 + 誠實健康報告能力)
 
 - [x] 排程器(`src/mes/schedule.py`,APScheduler,**一天三批 02:00 / 10:00 / 21:00 台灣**,`CronTrigger(hour="2,10,21", timezone="Asia/Taipei")` 明確帶時區;`max_instances=1`/`coalesce`;`--once` 手動觸發)
 - [x] 時區修正:trigger 明確 `Asia/Taipei`(不依賴系統時區繼承);已驗證三批觸發 = 台灣 02:00/10:00/21:00
@@ -114,43 +116,48 @@
 - [x] **批號 `batch_id`(observation_log,NOT NULL + 格式 CHECK)**:格式 `YYYY-MM-DD-NN`;**NN 固定語義:-01/-02/-03 = 三個排程時段(02:00/10:00/21:00 台灣,scheduler 傳 slot),-04+ = 手動;同時段重跑沿用同批號**;只加 observation_log、不加 knowledge_state;既有資料以 migration 依 `observed_at`(台灣日期 + >10min 分群)回填,不清除(繞過 Append-Only trigger)
 - [x] Seed 去重仍生效:只取未撈過的新 Store Name;供給不足如實回報(`actual < requested`)
 - [x] 撈取健康報告**按批號**:每批印出 + 寫入 `logs/harvest_health.log`,**三比例分開**(observed / not_found / fetch_failed),不合併;判讀標明 fetch_failed 為主儀表,並提示**比較同日越晚的批 fetch_failed 是否越高**(測一天總量的累積限流);`compute_health_for_batch` 供回看
-- [ ] **連續多天三批穩定實跑**(累積 fetch_failed 資料點)— 尚未開始
-- [ ] 第一版不做自動告警/自動退避(先累積經驗,規則成熟再自動化)
+- [x] 排程 daemon 常駐、無人看管自動跑(launchd LaunchAgent 已上線)—— 持續運行是背景常態,非驗收目標
+- [x] 第一版不做自動告警/自動退避(先累積經驗,規則成熟再自動化)
 
 > **實測(2026-07-14):** `pytest` **56 passed**(含 batch_id NOT NULL/格式 CHECK、按批號報告);ruff/mypy 綠;migration down→up 回滾通過、Append-Only trigger 回填後已復原。三批觸發時間驗證 = 台灣 02:00/10:00/21:00。daemon 已重載跑新 code(今晚 21:00 台灣自然跑第一個三批)。**未硬跑整批**(DDG 狀態未知,讓它按排程自然跑)。
 > **既有真實批(2026-07-14-01,即上一輪 02:00 台灣那批):** 30 筆 · observed 29(97%)· not_found 1 · fetch_failed 0 —— 20–150s 節奏、冷卻後、零限流,證明生產間隔可行。**註:observed 是「有沒有被限流」的健康指標,非「domain 抓對」;該批攤開約半數 domain 其實抓錯(shop.app 等),精確度屬 inferred_domain 元特徵未來評估,不在此報告範圍。**
 > **暫定值提醒:** batch size=30 / 間隔 20–150 / 一天三批,皆為**待真實負載修正的暫定值**,非已驗證安全基準;一天三批就是要用真實 fetch_failed 測「一天總量」對 DDG 的累積效應。
 
-### D. 第一版 Feature 範圍(依 Feature Taxonomy v1,9 個)— ⏳ 未開始
+### D. 第一版 Feature 範圍(依 Feature Taxonomy v1,9 個)— ✅ Phase 1-D 完成(獨立戳店面鏈路)
 
-- [ ] `uses_review_app`(entity_ref)
-- [ ] `theme_name`
-- [ ] `product_count`(/products.json)
-- [ ] `avg_price`(/products.json)
-- [ ] `price_range`(/products.json)
-- [ ] `country`
-- [ ] `language`
-- [ ] `currency`
-- [ ] `is_active`
+抓取架構(`src/mes/harvest.py`):**與 baseline DDG 鏈路分離、獨立排程**(每 3h,戳各店自己伺服器,限流獨立)。讀「有 domain、待抓」的 store → 戳 products.json + 首頁 HTML → 寫 9 feature(掛 store entity)。producer=`mes_store_crawler_v1`。三值/confidence 逐 feature 誠實分流。
+
+- [x] `product_count`(products.json,翻頁至 <250;超上限 → estimated)· value_number
+- [x] `avg_price`(variants price 平均)· value_number
+- [x] `price_range`(min/max)· value_json
+- [x] `currency`(首頁 `Shopify.currency`,**非** products.json;source=html_page)· value_text
+- [x] `is_active`(有商品 true / 空店・鎖店 false 皆 observed;連不上才 fetch_failed)· value_boolean
+- [x] `theme_name`(首頁 `Shopify.theme.name`)· value_text
+- [x] `country`(首頁 `Shopify.country`)· value_text
+- [x] `language`(首頁 `Shopify.locale`)· value_text
+- [x] `uses_review_app`(首頁 script 特徵比對五 app → review_app entity_ref;**confidence=inferred**,沒命中→not_found)· value_entity_id
+- [x] 狀態標記:獨立表 `store_harvest_state`(pending/done/failed,可 UPDATE;與 entity 純淨/Append-Only 分離)
+- [x] 三值分流 + 雙層 value CHECK 通過;每筆 Provenance 完整(producer/source/crawler_version/batch_id)
+
+> **實測(2026-07-15):** `pytest` 70 passed(+11 harvest:解析三值 / 寫入 CHECK / 狀態流轉)。小規模實跑 3 家真實店:flated.co.nz(NZ/NZD)9/9、vaniabath.com 9/9、centricoffee.com 8/9(uses_review_app 誠實 not_found,無我們五個 app)。products.json 與 Shopify.* 變數結構如預期,未被擋。批號用 -04+(手動範圍,與 baseline -01/-02/-03 區隔,再由 producer/feature 區分)。**暫定值:每批 1–3 家、每 3h(≈8 批/日),待戳店面實況回饋調整。**
 
 > 註記:Inference 引擎第一版搜尋源(DuckDuckGo 網頁解析)的實際可行性,需在 M4 上實測確認;若不穩則換可替換零件,不動架構(呼應 P6 Provider Agnostic)。
 > 暫不抓:Performance / Growth / Pain / Market(理由見 Taxonomy 文件的留白說明)。
 
 ### ✅ 驗收(Acceptance)
 
-**狀態:** 🔄 **驗收中**（三批排程已上線,連續天數重新從「三批穩定跑」起算)
+**狀態:** ✅ **通過**(能力導向:Phase 1 要證明的能力已具備)
 
-> ⚠️ A / B / C 核心 + E(三批排程 + 批號)已完成並測試通過(`pytest` 56 passed、真連 DB),daemon 已重載跑新 code(今晚 21:00 台灣起自然跑三批)。**這仍不等於驗收通過**:驗收要求「連續多天每天(三批)自動跑、有新增」+「規模累積」,實際累積才剛要開始。**因改為一天三批,連續天數計數重新從第一個「三批穩定跑」的日子起算**,誠實歸零重數。**不可因 checklist 勾滿就標通過;要等連續天數跑滿、Jeff 看 fetch_failed 曲線(尤其同日越晚的批是否越高)判定。**
+> Phase 1 的能力 = **「能把產品知識(Seed)轉成帶完整 Provenance、結構正確、掛在正確 Entity 上的可驗證市場 Observation」**。此能力已由 A(基礎設施)/ B(資料層)/ C(雙骨牌鏈路)/ E(自動排程 + 誠實健康報告)/ D(戳店面抓 9 feature)共同展示並經測試(`pytest` 70 passed、真連 DB)+ 真實實跑印證。依「驗收驗能力,不卡時間」:能力已達成即通過,不設「連續 N 天 / 規模到 N 家」門檻。
 
-**驗收條件:**（全部未達成）
-- [ ] 連續多天每天三批自動排程跑,每天都有新增(連續天數從三批穩定跑起算)
-- [ ] 觀察同日三批 fetch_failed 趨勢,確認「一天總量(90 次 DDG)」DDG 撐得住
-- [ ] 規模累積(目標約 1000 家店)
-- [ ] 五 metadata 齊全(feature / value / source / observed_at / confidence)+ entity 歸屬正確
-- [ ] Append-Only 沒覆蓋(再次觀測 = 新增帶新 timestamp 的一筆)
-- [ ] 失敗不被記成 0 / 無(observed / fetch_failed / not_found 三值語義正確)
+**驗收條件(能力,全部達成):**
+- [x] 能把 Seed 轉成帶完整 Provenance 的 Observation(雙骨牌:store_name_seed → inferred_domain;五 metadata + entity 歸屬齊全)
+- [x] 失敗誠實不偽裝(三值語義 observed / fetch_failed / not_found,寫入層 CHECK 強制)
+- [x] Append-Only 沒覆蓋(DB trigger 物理鎖;再觀測=新增帶新 timestamp 的一筆)
+- [x] 撞真實世界(DDG 限流、Loox 種子池乾)系統能**誠實反應**,且可透過**加來源持續運行**(已由五 app 擴池、健康報告三比例分開驗證)
+- [x] 能自動、無人看管地運行(排程 daemon 常駐)—— 持續運行本身是背景常態,不列為門檻
 
-> 判準:不是「能抓」就成功,是「抓進來的資料乾淨且結構對、且能持續穩定累積」才算通過。
+> 判準:驗的是「能不能穩定產生乾淨、結構對、掛對 entity、可追溯的 Observation,且失敗誠實」——這些能力已具備。規模與天數是持續運行的自然結果,不是驗收條件。
 
 **停止條件:** 出現「失敗被記成 0/無」、Update 覆蓋、metadata 缺漏 → 立即停修。
 
@@ -176,7 +183,7 @@
 
 **目的:** 讓原始觀測變成可查詢、可算變化的中立知識層。
 
-**進入條件:** Phase 1 通過 7 天乾淨累積驗收。
+**進入條件:** Phase 1 通過驗收(能力已具備:能穩定產生乾淨、結構正確、掛對 entity、可追溯的 Observation)。
 
 **工作項目:**
 

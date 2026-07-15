@@ -21,6 +21,7 @@ import sys
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from mes.harvest import run_store_harvest_batch
 from mes.pipeline import run_daily_batch
 
 # Three fire times a day, in Taiwan time. The CronTrigger's timezone is set EXPLICITLY
@@ -35,11 +36,20 @@ from mes.pipeline import run_daily_batch
 # sync with pipeline.FIRST_MANUAL_SEQ (= len(SCHEDULED_SLOTS) + 1).
 HARVEST_TZ = "Asia/Taipei"
 HARVEST_MINUTE = 0
-SCHEDULED_SLOTS = {2: 1, 10: 2, 21: 3}  # 02:00 -> 01, 10:00 -> 02, 21:00 -> 03
+SCHEDULED_SLOTS = {2: 1, 10: 2, 21: 3}  # baseline (DDG): 02:00 -> 01, 10:00 -> 02, 21:00 -> 03
+
+# Store feature-harvest (Phase 1-D): INDEPENDENT schedule. Pokes each store's own server
+# (products.json + homepage) — a different target from DDG, independent rate-limiting.
+# Every 3h in Taiwan time (00/03/06/09/12/15/18/21) ≈ 8 batches/day × 1–3 stores.
+STORE_HARVEST_HOURS = "*/3"
 
 
 async def _job(slot: int) -> None:
     await run_daily_batch(slot=slot)
+
+
+async def _store_harvest_job() -> None:
+    await run_store_harvest_batch()
 
 
 def build_scheduler() -> AsyncIOScheduler:
@@ -53,6 +63,13 @@ def build_scheduler() -> AsyncIOScheduler:
             max_instances=1,  # never overlap the same slot
             coalesce=True,  # if we missed a fire, run once, not N times
         )
+    scheduler.add_job(
+        _store_harvest_job,
+        CronTrigger(hour=STORE_HARVEST_HOURS, minute=HARVEST_MINUTE, timezone=HARVEST_TZ),
+        id="store_harvest",
+        max_instances=1,
+        coalesce=True,
+    )
     return scheduler
 
 
@@ -60,7 +77,10 @@ async def _run_forever() -> None:
     scheduler = build_scheduler()
     scheduler.start()
     times = ", ".join(f"{h:02d}:{HARVEST_MINUTE:02d}->-{s:02d}" for h, s in SCHEDULED_SLOTS.items())
-    print(f"[mes.schedule] harvest scheduled {HARVEST_TZ}: {times} (三批/日)")
+    print(
+        f"[mes.schedule] baseline(DDG) {HARVEST_TZ}: {times} (三批/日) | "
+        f"store-harvest: every {STORE_HARVEST_HOURS}h (獨立鏈路)"
+    )
     try:
         await asyncio.Event().wait()  # keep the event loop alive
     finally:
