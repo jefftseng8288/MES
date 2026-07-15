@@ -1,10 +1,13 @@
-"""Shopify App Store review-page scraper — Loox Store Names (Phase 1-C).
+"""Shopify App Store review-page scraper — Store Names from five review apps.
 
 Real-world, version-sensitive. The selector below was verified against the live
-apps.shopify.com HTML on 2026-07-11: each review sits in a
-``data-merchant-review`` block; the merchant Store Name is the ``title`` attribute
-of a ``<span>`` inside a ``tw-text-heading-xs tw-text-fg-primary`` div (the title
-holds the full name even when visually truncated). ~10 reviews per page.
+apps.shopify.com HTML on 2026-07-11 (loox) and 2026-07-15 (the other four): each
+review sits in a ``data-merchant-review`` block; the merchant Store Name is the
+``title`` attribute of a ``<span>`` inside a ``tw-text-heading-xs tw-text-fg-primary``
+div (the title holds the full name even when visually truncated). ~10 reviews/page.
+The selector is the SAME App Store HTML across all apps (it's the store's chrome,
+not the app's). Harvesting all five widens the seed supply (loox alone drained by
+day 2 — see findings).
 
 If the page structure changes, ``parse_store_names`` returns fewer/zero names —
 report that (it is itself signal), do not paper over it with a guessed selector.
@@ -30,6 +33,16 @@ _USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 )
 _BASE = "https://apps.shopify.com"
+
+# Review-app name -> Shopify App Store URL handle (handles verified 2026-07-15; they
+# are NOT all the same as the app's canonical name — e.g. stamped's slug is historical).
+REVIEW_APP_HANDLES = {
+    "loox": "loox",
+    "judgeme": "judgeme",
+    "yotpo": "yotpo-social-reviews",
+    "okendo": "okendo-reviews",
+    "stamped": "product-reviews-addon",
+}
 
 # Verified selector (2026-07-11). Kept as one place so a structure change is a
 # single edit + a doc/version bump.

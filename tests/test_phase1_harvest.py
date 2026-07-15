@@ -28,6 +28,15 @@ async def session() -> AsyncGenerator[AsyncSession, None]:
     await engine.dispose()
 
 
+def test_five_review_app_handles_registered() -> None:
+    from mes.scrape import REVIEW_APP_HANDLES
+
+    assert set(REVIEW_APP_HANDLES) == {"loox", "judgeme", "yotpo", "okendo", "stamped"}
+    # handles are the App Store URL slugs (not all equal to the app name)
+    assert REVIEW_APP_HANDLES["stamped"] == "product-reviews-addon"
+    assert REVIEW_APP_HANDLES["yotpo"] == "yotpo-social-reviews"
+
+
 def test_three_proportions_computed_separately() -> None:
     # 6 observed, 3 not_found, 1 fetch_failed out of 10.
     statuses = ["observed"] * 6 + ["not_found"] * 3 + ["fetch_failed"]

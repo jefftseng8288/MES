@@ -36,7 +36,7 @@ from mes.ingest import (
     ingest_seed,
 )
 from mes.normalize import seed_key
-from mes.scrape import fetch_review_page, parse_store_names
+from mes.scrape import REVIEW_APP_HANDLES, fetch_review_page, parse_store_names
 
 # Taipei tz for batch_id dating — all three of a Taiwan-day's batches (02:00/10:00/
 # 21:00 TW) share the same YYYY-MM-DD prefix, numbered -01/-02/-03 in fire order.
@@ -112,9 +112,9 @@ class HealthReport:
         ]
         if self.actual < self.requested:
             lines.append(
-                f"      供給不足:Loox 只湊到 {self.actual} 個未撈過的新 Store Name"
+                f"      供給不足:五個 review app 只湊到 {self.actual} 個未撈過的新 Store Name"
                 f"(要 {self.requested});未重複撈同店湊數。"
-                "\n      這是真實資訊(評論頁翻到底 / 新店供給有限)。"
+                "\n      這是真實資訊(各 app 評論頁翻到底 / 新店供給有限)。"
             )
         lines.append("=" * 44)
         return "\n".join(lines)
@@ -146,42 +146,47 @@ async def _resolve_batch_id(session: AsyncSession, day_str: str, slot: int | Non
 
 async def _gather_new_store_names(
     session: AsyncSession, count: int, *, page_sleep: bool
-) -> list[str]:
-    """Collect up to ``count`` Store Names from Loox whose Seed does not yet exist.
+) -> list[tuple[str, str]]:
+    """Collect up to ``count`` (store_name, app_key) whose Seed does not yet exist.
 
-    Dedupes within the batch and against existing store_name_seed entities (Seed
-    dedupe stays in force — we do NOT re-harvest the same store to hit the number).
-    Stops early if a page yields no names (ran out / structure changed) — that
-    shortfall is itself honest signal, reported via HealthReport.actual < requested.
+    Harvests across all five review apps (REVIEW_APP_HANDLES), round-robin by page so
+    load spreads and fresh supply is found fast (loox alone drained by day 2). Dedupes
+    within the batch and against existing store_name_seed entities (Seed dedupe stays
+    in force — we do NOT re-harvest the same store to hit the number). A shortfall
+    (actual < count) is honest signal, reported via HealthReport.
     """
-    collected: list[str] = []
+    collected: list[tuple[str, str]] = []
     seen_keys: set[str] = set()
-    page = 1
-    while len(collected) < count and page <= MAX_PAGES:
-        try:
-            html = fetch_review_page("loox", page)
-        except httpx.HTTPError:
-            break
-        names = parse_store_names(html)
-        if not names:
-            break
-        for name in names:
-            key = seed_key(name)
-            if key in seen_keys:
+    for page in range(1, MAX_PAGES + 1):
+        progressed = False  # did any app yield names at this page depth?
+        for app_key, handle in REVIEW_APP_HANDLES.items():
+            if len(collected) >= count:
+                return collected
+            try:
+                html = fetch_review_page(handle, page)
+            except httpx.HTTPError:
                 continue
-            seen_keys.add(key)
-            exists = await session.scalar(
-                select(Entity.entity_id).where(
-                    Entity.entity_type == "store_name_seed", Entity.canonical_key == key
+            names = parse_store_names(html)
+            if names:
+                progressed = True
+            for name in names:
+                key = seed_key(name)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                exists = await session.scalar(
+                    select(Entity.entity_id).where(
+                        Entity.entity_type == "store_name_seed", Entity.canonical_key == key
+                    )
                 )
-            )
-            if exists is None:
-                collected.append(name)
-                if len(collected) >= count:
-                    break
-        page += 1
-        if page_sleep and len(collected) < count:
-            time.sleep(random.uniform(MIN_PAGE_DELAY, MAX_PAGE_DELAY))
+                if exists is None:
+                    collected.append((name, app_key))
+                    if len(collected) >= count:
+                        return collected
+            if page_sleep:
+                time.sleep(random.uniform(MIN_PAGE_DELAY, MAX_PAGE_DELAY))
+        if not progressed:
+            break  # every app is out of pages at this depth
     return collected
 
 
@@ -214,8 +219,10 @@ async def run_daily_batch(
             day_str = datetime.now(_TAIPEI).date().isoformat()
             batch_id = await _resolve_batch_id(session, day_str, slot)
             names = await _gather_new_store_names(session, batch_size, page_sleep=page_sleep)
-            for i, name in enumerate(names):
-                seed = await ingest_seed(session, name, batch_id=batch_id)
+            for i, (name, app_key) in enumerate(names):
+                seed = await ingest_seed(
+                    session, name, batch_id=batch_id, source_page_label=f"{app_key} review page"
+                )
                 await session.commit()
                 result = infer_domain(name)
                 if result.status == "observed" and result.domain and result.raw_url:

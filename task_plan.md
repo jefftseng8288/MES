@@ -94,7 +94,7 @@
 
 ### C. 抓取與推論鏈路(依 Roadmap v8 五步)— 🔄 骨架完成,寫入鏈路已實測
 
-- [x] 1. Shopify App Store 評論區 Scraper(`src/mes/scrape.py`):遵守 robots.txt(`/reviews` 允許)、5–25 秒隨機 `time.sleep`;抓 Loox 評論頁 Store Name。selector 於 2026-07-11 對真實 HTML 實測(`data-merchant-review` 區塊 → `title` 屬性),每頁 ~10 則
+- [x] 1. Shopify App Store 評論區 Scraper(`src/mes/scrape.py`):遵守 robots.txt(`/reviews` 允許)、5–25 秒隨機 `time.sleep`;抓**五個 review app**(loox / judgeme / yotpo / okendo / stamped)評論頁 Store Name,handle 於 2026-07-15 實測(見 `REVIEW_APP_HANDLES`)。selector 於 2026-07-11 對真實 HTML 實測(`data-merchant-review` 區塊 → `title` 屬性),各 app 通用,每頁 ~10 則
 - [x] 2. Inference 引擎 Name→Domain(`src/mes/inference.py`):Store Name + "shopify store" → DuckDuckGo(`html.duckduckgo.com/html/`,可替換零件)→ regex 蒸餾 → 黑名單過濾取第一筆可信 domain。實測 5/5 命中(見 progress)
 - [x] 3. Normalize(`src/mes/normalize.py`):domain 小寫/去 scheme/去 www/去 path/去 port → canonical_key → 寫 store entity;seed name 正規化 → `seed:` 前綴。收斂單一模組
 - [x] 4. Event Sourcing 寫入(`src/mes/ingest.py`):雙骨牌先 append Observation_Log(entity_id 不可空)。Knowledge_State 投影屬 Phase 2,本階段不做
@@ -109,7 +109,7 @@
 
 - [x] 排程器(`src/mes/schedule.py`,APScheduler,**一天三批 02:00 / 10:00 / 21:00 台灣**,`CronTrigger(hour="2,10,21", timezone="Asia/Taipei")` 明確帶時區;`max_instances=1`/`coalesce`;`--once` 手動觸發)
 - [x] 時區修正:trigger 明確 `Asia/Taipei`(不依賴系統時區繼承);已驗證三批觸發 = 台灣 02:00/10:00/21:00
-- [x] 每批 = 30 筆未撈過的 Loox Seed(`run_daily_batch`),沿用既有雙骨牌鏈路,核心未動;三批分散(8h/11h/5h)測「一天總量(90 次 DDG)」而非短時爆量
+- [x] 每批 = 30 筆未撈過的 Seed,**跨五個 review app 輪詢**(loox/judgeme/yotpo/okendo/stamped,round-robin by page 分散負載+放大供給;loox 單獨第二天即抽乾)沿用既有雙骨牌鏈路,核心未動;三批分散(8h/11h/5h)測「一天總量(90 次 DDG)」而非短時爆量
 - [x] 節流:每筆之間 **20–150 秒隨機** sleep(隨機為硬性要求;跨度 130 秒拉寬);保守起點,待真實負載回饋調整。30×~85s ≈ 42 分鐘/批
 - [x] **批號 `batch_id`(observation_log,NOT NULL + 格式 CHECK)**:格式 `YYYY-MM-DD-NN`;**NN 固定語義:-01/-02/-03 = 三個排程時段(02:00/10:00/21:00 台灣,scheduler 傳 slot),-04+ = 手動;同時段重跑沿用同批號**;只加 observation_log、不加 knowledge_state;既有資料以 migration 依 `observed_at`(台灣日期 + >10min 分群)回填,不清除(繞過 Append-Only trigger)
 - [x] Seed 去重仍生效:只取未撈過的新 Store Name;供給不足如實回報(`actual < requested`)

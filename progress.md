@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-07-15(晚)— scraper 擴到五個 review app(解 Loox 供給見底)
+
+- **動機:** 10:00 批(2026-07-15-02)只湊到 **11/30** —— Loox 種子供給在 `MAX_PAGES=12`(約 120 名)範圍內第二天就抽乾(健康報告誠實標「供給不足」;Seed 去重生效、未重複撈同店湊數;DDG 這批 100% 沒事)。
+- **做法:** scraper 從只抓 loox 擴到**五個 review app**。先實測真實 App Store handle(非都等於 app 名):`loox` / `judgeme` / `yotpo-social-reviews` / `okendo-reviews` / `product-reviews-addon`(stamped 的歷史 slug)。selector 各 app **通用**(是 App Store 的 HTML,非 app 專屬)。
+- **`_gather_new_store_names` 改跨 app round-robin(by page)**:page 1 各 app 輪一遍 → 分散負載、最快找到新供給;回傳 `(store_name, app_key)`,`observed_on_app_store` 的 value_text 記來源 app。
+- **驗證(只跑蒐集、不碰 DDG、不寫入):** 一次湊到 **30 個新 Store Name**(judgeme 10 + yotpo 10 + okendo 10,page 1 就夠;**loox 貢獻 0 = 確認已抽乾**)。供給問題解決。
+- **改的檔:** `scrape.py`(`REVIEW_APP_HANDLES` + 標題)、`pipeline.py`(跨 app 蒐集 + 帶 app 來源 + 供給不足訊息改「五個 review app」)、`test_phase1_harvest.py`(+1 handle sanity 測試)、task_plan/progress/findings。核心(雙骨牌/三值/producer/Append-Only/CHECK)未動。
+- **測試:** `pytest` 59 passed;ruff/mypy 綠。daemon 已重載跑新 code —— 今晚 21:00(-03)起能拿滿 30。
+
 ## 2026-07-15(早)— 首個乾淨排程批(02:00)+ 測試批號 sentinel 化 + 污染標記
 
 - **測試批號改 sentinel:** 測試 fixture 原硬編 `2026-07-15-01` 等真實日期批號,pytest 一跑就往 dev DB 寫,**正好撞上真實排程 02:00 槽位**。改全部測試批號為 `2099-*`(sentinel 年份,永不撞真實 20xx 排程)。(test_phase1b `_obs` / raw INSERT、test_phase1c `_BATCH`、test_phase1_harvest `_BATCH`。)
