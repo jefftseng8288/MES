@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mes.alarm</string>
+
+    <!-- Independent one-shot: fires the alarm check at 23:50 daily, then exits.
+         Deliberately SEPARATE from the harvest daemon — if that daemon is dead/broken,
+         this still runs and can report "批次執行異常". -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/cashflow/Documents/MES/.venv/bin/python</string>
+        <string>-m</string>
+        <string>mes.alarm</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/cashflow/Documents/MES</string>
+
+    <!-- StartCalendarInterval fires in the machine's LOCAL time (Taiwan, UTC+8).
+         23:50 local = 23:50 台灣. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>50</integer>
+    </dict>
+
+    <!-- One-shot: do not run at load, do not keep alive; just fire on schedule. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/cashflow/Documents/MES/logs/alarm.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/cashflow/Documents/MES/logs/alarm.err.log</string>
+</dict>
+</plist>

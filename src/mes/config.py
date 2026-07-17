@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     database_url: str
     log_level: str = Field(default="INFO")
 
+    # Telegram alarm push (optional). If either is empty, alarm delivery is a no-op
+    # (logged) — the check still runs and records alerts to the DB.
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+
 
 def get_settings() -> Settings:
     """Load settings, raising a clear error if required variables are missing."""

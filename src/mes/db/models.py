@@ -294,3 +294,25 @@ class StoreHarvestState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
     )
+
+
+class AlertLog(Base):
+    """警鈴觸發的結構化記錄:異常 + 診斷出的原因 + 當天數據。
+
+    這是「未來自動生成調整策略」要學的燃料——每次叫痛都留下「異常+原因+證據」。
+    `alert_type` 刻意**不** CHECK 鎖(彈性擴充新異常類型,如同 feature);`detail` 用 JSONB
+    存當天三批數據 + 門檻,結構開放。**這只記錄+推播,不做任何自動調整。**
+    """
+
+    __tablename__ = "alert_log"
+
+    alert_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    fired_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    taiwan_date: Mapped[str] = mapped_column(String(10), nullable=False)  # YYYY-MM-DD (巡檢當天)
+    alert_type: Mapped[str] = mapped_column(String(32), nullable=False)  # 不 CHECK 鎖,利擴充
+    diagnosis: Mapped[str] = mapped_column(Text, nullable=False)  # 判讀出的最可能原因(人讀)
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # Telegram 是否送達(留 credential 空時為 False)。
+    delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -6,6 +6,18 @@
 
 ---
 
+## 2026-07-17 — 警鈴(主動回報 + 原因診斷):系統從「哑巴」變「會叫痛」
+
+- **Telegram 基礎設施:MES 原本零接**（整個獨立專案無任何 telegram/bot/notify 痕跡,只有 schedule.py 一句「no auto-alert」註解）。本次從零接:`src/mes/notify.py`(Telegram Bot API sendMessage)+ config 加 `MES_TELEGRAM_BOT_TOKEN`/`MES_TELEGRAM_CHAT_ID`(選填,缺則 no-op、只記 DB)。**⚠️ 實際送達待 Jeff 提供 bot token + chat_id。**
+- **定位鐵律:只主動回報 + 初步診斷,不做任何自動調整/退避/加來源。** 判斷怎麼調由 Jeff 決定;現在先把「異常+原因」記下來當未來自動化的燃料。
+- **`src/mes/alarm.py`**:每天 23:50 台灣獨立跑,讀當天三批(-01/-02/-03)巡檢三警鈴:(1) 連續兩批新 Seed <10;(2) 連續兩批 fetch_failed >15;(3) 任一批 observed=0(單批即觸發)。門檻暫定,待實況調。
+- **原因診斷(核心):** 用既有資料判讀最可能原因跟警報一起推。0-observed 分辨 fetch_failed 佔滿(限流)/ not_found 佔滿(市場搜不到)/ 無新 Seed(池子乾)/ 批次無記錄(執行異常)—— 對應完全不同的調整方向。
+- **結構化記錄:** 新增 `alert_log` 表(alert_id / fired_at / taiwan_date / alert_type / diagnosis / detail JSONB / delivered)。`alert_type` **不 CHECK 鎖**(利未來擴充新異常類型);`detail` 存當天三批數據 + 門檻。只記錄+推播,不自動調整。
+- **獨立掛法(關鍵):** launchd `com.mes.alarm`,StartCalendarInterval 23:50(本地=台灣),RunAtLoad=false 一次性。**刻意與 harvest daemon 分離** —— 若那個 daemon 死了,警鈴(獨立程序)才能照跑並報「批次執行異常」;綁在一起的話 daemon 一死警鈴也啞,正好在最需要時失聲。
+- **推播策略:** 只在有異常時推、正常安靜(不推「一切正常」);一天多警鈴合併成一則不洗版。
+- **實測:** `pytest` **80 passed**(+10 alarm)。真實資料:7/15、7/16 健康日正確安靜、三批讀取準確;四個異常情境的訊息+診斷已驗(含多警鈴合併)。已 `launchctl load`(排程中,無 PID = 等 23:50 觸發)。
+- **改的檔:** 新增 alarm.py / notify.py / alert_log migration / test_alarm.py / deploy/com.mes.alarm.plist;改 config.py / .env.example / models.py(AlertLog)/ db/__init__.py。**核心鏈路未動。未 commit。**
+
 ## 2026-07-15(深夜)— Phase 1-D:戳店面抓 9 個市場 feature(獨立排程)
 
 - **架構:與 baseline DDG 鏈路分離、獨立。** 新增 `src/mes/harvest.py`:讀「有 domain、待抓」的 store → 戳該店 products.json + 首頁 HTML → 寫 9 feature(掛 store entity)。戳的是各店伺服器/Cloudflare,與 DDG 不同對象、限流獨立、兩鏈路並行不干擾。獨立排程 `store_harvest`(每 3h,≈8 批/日、每批 1–3 家)。

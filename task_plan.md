@@ -144,6 +144,18 @@
 > 註記:Inference 引擎第一版搜尋源(DuckDuckGo 網頁解析)的實際可行性,需在 M4 上實測確認;若不穩則換可替換零件,不動架構(呼應 P6 Provider Agnostic)。
 > 暫不抓:Performance / Growth / Pain / Market(理由見 Taxonomy 文件的留白說明)。
 
+### F. 警鈴 — 主動回報 + 原因診斷(痛覺神經)— ✅ 完成
+
+系統從「被動哑巴」→「會叫痛」。**只做主動回報 + 初步診斷,不做任何自動調整/退避/加來源**(規則還在猜,先累積「異常+原因」當未來自動化的燃料)。
+
+- [x] 獨立程序(`src/mes/alarm.py`),每天 **23:50 台灣**跑一次(launchd `com.mes.alarm`,StartCalendarInterval 本地時間,一次性;**刻意獨立於 harvest daemon** —— 那個死了警鈴才能報「批次執行異常」)。不跨日(已知漏報、接受)
+- [x] 三警鈴(門檻暫定,待實況調):(1) 連續兩批新 Seed < 10 → 供給不足;(2) 連續兩批 fetch_failed > 15 → 疑似限流;(3) 任一批 observed = 0 → 單批即觸發、**必帶原因診斷**
+- [x] **原因診斷(核心)**:用既有資料(三值組成 / 供給 / 執行狀況)判讀最可能原因,跟警報一起推。0 observed 分辨:fetch_failed 佔滿→限流 / not_found 佔滿→市場搜不到 / 無新 Seed→池子乾 / 批次無記錄→執行異常
+- [x] 結構化記錄 `alert_log`(時間 / 類型 / 診斷 / 當天三批數據 JSONB;alert_type 不 CHECK 鎖利擴充)—— 未來自動調整要學的燃料
+- [x] Telegram 推播(`src/mes/notify.py`,`MES_TELEGRAM_BOT_TOKEN`/`CHAT_ID`);**只在有異常時推、正常安靜**;多警鈴合併一則不洗版。**⚠️ 待 Jeff 提供 bot token + chat_id 才能實際送達**(缺憑證則只記 DB、不推)
+
+> **實測(2026-07-17):** `pytest` 80 passed(+10 alarm:三警鈴觸發 / 連續 vs 非連續 / 0-observed 四種診斷分辨 / DB 記錄 / 只異常才推 / 無憑證 no-op)。真實資料驗證:7/15、7/16(健康日)正確**安靜不誤報**、三批讀取準確。四個異常情境的 Telegram 訊息格式與診斷已驗(含多警鈴合併)。門檻 <10 / >15 為暫定起點,標在 code 註解 + findings。
+
 ### ✅ 驗收(Acceptance)
 
 **狀態:** ✅ **通過**(能力導向:Phase 1 要證明的能力已具備)
