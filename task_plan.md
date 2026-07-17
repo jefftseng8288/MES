@@ -193,28 +193,67 @@
 
 **狀態:** 未開始
 
-**目的:** 讓原始觀測變成可查詢、可算變化的中立知識層。
+**目的:** 把流水帳般的 Observation 收斂成「誠實反映流動現況」的、中立的、可查歷史的 Knowledge 層。
 
 **進入條件:** Phase 1 通過驗收(能力已具備:能穩定產生乾淨、結構正確、掛對 entity、可追溯的 Observation)。
 
+**設計文件:** `docs/MES_Phase2_Knowledge_Engine.md`(Phase 2 的可實作設計,與 Phase 0 五份 schema 同級)。
+
+**三個定案決定(Phase 2 的靈魂,Jeff 定案):**
+
+- **決定 1 —— 取值「時間(新鮮度)優先於信心度」。** 同一 (entity, feature) 有多筆 observed 時取最新那筆,即使 confidence 較低(新 inferred)也優先於較舊但較高(舊 certain)。理由:資料是流動的,寧要「最新、帶推論成分的現況」,不要「確定、但已入土的歷史」(基於過期事實做動作會白費且造成歸因困境)。取值序:`status(只取 observed)→ observed_at 最新 → confidence(僅同時間 tiebreaker)`。
+- **決定 2 —— fetch_failed 保留舊值,但誠實標明新鮮度與當前狀態。** fetch_failed 是「系統失能」(被擋/斷網),不代表商家變了;若一次失敗就抹去舊值,狀態會隨網路波動閃爍歸零。做法:保留上次 observed 的值,同步更新 `last_observed_at`(上次成功觀測時間)+ `current_status`(最近一次嘗試的結果)。
+- **決定 3 —— 投影時機 = 定時批次,每天 23:30 台灣(警鈴 23:50 之前)。** 守「拒絕不必要的即時性」:一天三批的量不需即時投影,也不搞增量觸發的複雜架構。先投影(23:30)收斂當天 observation,再警鈴(23:50)體檢。
+
 **工作項目:**
 
-- [ ] 實作 Knowledge Engine:把 Observation_Log 投影成 Knowledge_State(非同步批次重算)
-- [ ] Normalize:單位統一(幣別、時間格式)
-- [ ] 實作取值邏輯(Default rule:status → 新鮮度 → confidence tiebreaker;country 覆寫為 confidence 優先)
-- [ ] 守 P2:Normalize 不做任何判斷/評分(不標「高價值/高風險」)
-- [ ] 支援查詢「某 Entity 的某 feature 隨時間的變化序列」
-- [ ] 重建能力:可砍掉 Knowledge_State 全表並從 Observation_Log 完整重建(可回滾驗收條件)
+*A. knowledge_state schema 擴充(由決定 2 導出;趁空表擴充成本近零)*
+
+- [ ] knowledge_state 加 `last_observed_at`(timestamp)+ `current_status`(受控字串 CHECK,沿用三值)
+- [ ] knowledge_state **DB 層 CHECK**(物理鎖死合法狀態組合,不信任投影代碼):
+  - `last_observed_at IS NULL` → value 必 NULL(所有 typed 欄 + value_raw 皆 NULL)、`current_status` 只能 fetch_failed / not_found(防「從沒成功卻有值」的鬼值)
+  - `last_observed_at IS NOT NULL` → value 必非 NULL、`current_status` 任意(防「曾成功卻沒值」的空洞)
+- [ ] 同步更新 `docs/MES_Knowledge_Schema_v1.md`(加這兩欄 + 語義 + 決定 2 理由;並修正 §3 舊述「country 覆寫為 confidence 優先」為決定 1 + country 特例的精確定義)—— 於實作時做
+
+*B. 投影引擎(Knowledge Engine 核心)*
+
+- [ ] 實作投影:讀 observation_log,對每個 `(entity_id, feature)` 依取值邏輯算出 knowledge_state 一列
+- [ ] 取值邏輯(依決定 1、2):候選=該組合所有 observed → 取 observed_at 最新(同時間才 confidence tiebreaker)寫 value/value_type/typed 欄/source_observation_id/last_observed_at;`current_status` = 該組合最近一筆 observation(不論成敗)的 status;若從無 observed → 不投影出值,但可記 current_status
+- [ ] **country 特例(Jeff 定案):時間優先,但「低 confidence 的新值不覆蓋高 confidence 的舊值」**(剛性事實不被猜測污染:新 inferred 擋不住舊 certain,如 IP 猜的伺服器國 ≠ 註冊國)。**第一版只套 country**,不預先推廣到其他 feature
+- [ ] Normalize(單位統一:幣別、時間格式),**只正規化,不做任何判斷/評分**
+- [ ] 守 P2 中立(鐵律):投影/Normalize 絕不標「高價值/高風險」、不排序、不評分
+
+*C. 投影排程(依決定 3)*
+
+- [ ] 定時批次每天 **23:30 台灣**,獨立 daemon(launchd,**獨立於 harvest / alarm**,不綁死)
+- [ ] 順序:先投影(23:30)→ 再警鈴(23:50)
+
+*D. 時間序列查詢*
+
+- [ ] 支援查詢「某 entity 的某 feature 隨時間的變化序列」——直讀 observation_log(Append-Only 全歷史)依 observed_at 排序;當前值查 knowledge_state、歷史查 observation_log
+
+*E. 重建能力 + 純函數性*
+
+- [ ] 可砍掉 knowledge_state 全表並從 observation_log 完整重建;重建與日常投影**共用同一套取值邏輯**
+- [ ] **純函數重建:投影/重建禁用 `now()` / `CURRENT_TIMESTAMP`**;所有寫入 knowledge_state 的時間維度(last_observed_at 等)100% 由對應 observation_log 的 `observed_at` 投影而來(確保重建冪等:今天重建與明天重建結果一致)
+
+> **效能備註(非工作項):** 現階段規模(Shopify 全站據所知未破百萬,knowledge_state 頂多幾十萬列)本地 PostgreSQL 全表掃即毫秒級,**不預先加索引**(過度優化)。若未來投影**實測**變慢,第一順位候選 = observation_log 的 `(entity_id, feature, observed_at)` 複合索引(最大表、投影分群挑最新值最高頻打的地方)。knowledge_state 的 (entity_id, feature) 複合主鍵已自帶唯一索引。
 
 ### ✅ 驗收(Acceptance)
 
 **狀態:** ⬜ 未驗收(Phase 尚未開始)
 
-**驗收條件:**
-- [ ] 能查詢「某 Entity 的某 feature 隨時間的變化序列」(證明 Append-Only 歷史讀得出來,Growth 原料齊了)
-- [ ] 可砍掉 Knowledge_State 全表並從 Observation_Log 完整重建
+**驗收條件(能力導向):**
 
-**停止條件:** Normalize 混入判斷/評分 → 違反 P2,停;歷史查不出來 → Append-Only 沒生效,停。
+- [ ] 能對一個 (entity, feature) 依「時間優先」取出當前值(決定 1 生效)
+- [ ] fetch_failed 時保留舊值 + 誠實標明 last_observed_at / current_status(決定 2 生效)
+- [ ] DB CHECK 物理拒絕不老實的混合狀態(last_observed_at IS NULL 卻有 value 等 → 被擋)
+- [ ] country 特例生效:低 confidence 的新 inferred 不覆蓋高 confidence 的舊 certain(剛性事實不被猜測污染)
+- [ ] 能查詢某 entity 某 feature 隨時間的變化序列(Append-Only 歷史讀得出來)
+- [ ] 可砍掉 knowledge_state 全表並從 observation_log 完整重建,**且重建後與砍之前完全一致**(純函數性;禁用系統時間)
+- [ ] 投影/Normalize 全程中立,無任何判斷/評分(守 P2)
+
+**停止條件:** Normalize 混入判斷/評分 → 違反 P2,停;歷史查不出來 → Append-Only 沒生效,停;fetch_failed 抹去舊值(狀態閃爍歸零)→ 違反決定 2,停;重建結果隨執行時間浮動(用了系統時間)→ 違反純函數性,停。
 
 ---
 

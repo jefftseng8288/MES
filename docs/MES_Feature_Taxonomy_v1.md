@@ -76,7 +76,7 @@ Phase 1 crawler 的全部工作範圍。七大類只覆蓋三類半;Performance 
 - value_type:`string`(ISO 3166-1 alpha-2)
 - source:`html_page` / `products_json` 間接訊號(幣別、語言、地址)
 - confidence:多為 `inferred` — **接受粗糙,不讓它卡住 Phase 1**
-- 此即 Knowledge Schema「country 覆寫為 confidence 優先」規則的原因;未來可演進為多來源信心合併
+- 此即 Knowledge Schema country 取值特例的原因:**時間優先,但低 confidence 的新值不覆蓋高 confidence 的舊值**(剛性事實不被猜測污染;2026-07-17 Phase 2 拆解精確化,原述「confidence 優先」)。未來可演進為多來源信心合併
 
 **`language`**
 - value_type:`string`(ISO 639-1)
@@ -117,8 +117,8 @@ loox / judgeme / yotpo / okendo / stamped
 
 | feature | selection rule |
 |---|---|
-| country | confidence 優先(覆寫 default) |
-| 其餘 8 個 | default v1(status → 新鮮度 → confidence tiebreaker) |
+| country | 時間優先,但低 confidence 新值不覆蓋高 confidence 舊值(剛性事實保護;2026-07-17 精確化,原述「confidence 優先」)|
+| 其餘 8 個(含 currency) | default v1(status → 新鮮度 → confidence tiebreaker) |
 
 ---
 

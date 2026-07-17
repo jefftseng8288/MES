@@ -74,8 +74,10 @@ Default rule 不可能對所有 feature 都對:
 | feature | 適用規則 | 理由 |
 |---|---|---|
 | review_app / review_count / theme_name | default(最新優先) | 會變的狀態,時效優先 |
-| country | 可覆寫為 confidence 優先 | 幾乎不變;舊的 certain(結構化讀取)比新的 inferred(語言猜測)可信 |
-| currency | 可覆寫為 latest + confidence 並重 | 類似 country |
+| country | 時間優先,但**低 confidence 的新值不覆蓋高 confidence 的舊值** | 剛性物理屬性(稅務/金流,幾乎不變);舊的 certain(直讀 `Shopify.country`)勝過新的 inferred(如 IP 猜伺服器國)——伺服器託管國 ≠ 註冊國 |
+| currency | default(最新優先) | 第一版**不套** country 特例(country 特例第一版只套 country) |
+
+> 註:country 取值規則於 2026-07-17 Phase 2 拆解定案時**精確化**——原述「confidence 優先」改為「時間優先,但低 confidence 新值不覆蓋高 confidence 舊值」(即決定 1「時間優先」+ 剛性事實保護:新觀測 confidence ≥ 舊當前值 → 照時間優先;新 < 舊 → 不覆蓋、保留舊高 confidence 值)。理由:不是「country 不看時間」,而是「剛性事實不被低信心猜測污染」。**第一版只套 country**,是否推廣待未來證據決定。詳見 `MES_Phase2_Knowledge_Engine.md` 第三節。屬取值規則細化,版號不動。
 
 **機制:** 覆寫規則定義於 Feature Taxonomy 層(該 feature 的定義中註明 selection rule);Knowledge_State 每列記錄 `selection_rule_version`,規則改版後可精確知道哪些值由舊規則選出、需否重算。
 
