@@ -270,7 +270,9 @@
 
 **進入條件:** Phase 2 通過,Knowledge 層乾淨可作為輸入。
 
-**工作項目:**
+**設計文件:** `docs/MES_Phase2.5_Insight_Engine.md`(實作前準備:資料模型、value 受控方式、Pipeline Plugins 架構、23:40 排程、描述vs預測界線判準)。
+
+**工作項目(骨架 —— 概念層,保留):**
 
 - [ ] 實作 Rule 實作者(例:`IF product_count > 500 → High SKU`)
 - [ ] 實作 Statistics 實作者(例:最近 30 天 review 成長率 → Growth)
@@ -278,13 +280,41 @@
 - [ ] 每個 Insight 記 metadata:內容 / 產生者(rule_v1 / stat_v1)/ 基於哪些 Knowledge / 時間 / 信心
 - [ ] 確保 Insight 中不混入任何「預測」(預測屬於 Hypothesis 層)
 
+**實作層工作項(依設計文件補;分批建議:A = 第一批,B/C = 第二批):**
+
+*A. Insight 資料模型 —— 新表 `insight_store`(完全獨立於 knowledge_state,絕不混)*
+
+- [ ] 新表 `insight_store`:`insight_id`(UUID PK)/ `entity_id`(NOT NULL)/ `insight_type`(VARCHAR(50) NOT NULL,如 `SKU_SCALE` / `GROWTH_VELOCITY`)/ `value_text`(VARCHAR(255) NOT NULL,標籤如 `High SKU`)/ `producer`(VARCHAR(50) NOT NULL,如 `rule_v1` / `stat_v1`)/ `confidence`(VARCHAR(20) NOT NULL,沿用既有離散三級)/ `generated_at`(TIMESTAMPTZ NOT NULL)/ `source_knowledge_refs`(JSONB NOT NULL)
+- [ ] 一對多 + 一 entity 可多列(一家店可同時 High SKU + Growth,每 insight 一列);主鍵用 insight_id,不是 (entity_id, feature)
+- [ ] **value_text 受控,但第一版用「應用層驗證 + 集中定義」,不下沉 DB CHECK** —— 理由:insight_type / 標籤還在快速演化,DB 硬鎖太早(每加標籤改 migration,且受控清單只能往前加、難往後收,Phase 1-C 踩過)。做法:每個 insight_type 的合法 value 集合集中定義一處(registry 或 Producer 自聲明),InsightEngine 寫入前驗證。判準:**用「穩不穩定 / 會不會頻繁改」決定受控放 DB 還是應用層**;穩定既定事實(如 knowledge 的 currency)適合 DB CHECK,演化中的 insight 標籤先應用層,等穩定再考慮下沉
+- [ ] `source_knowledge_refs`(Provenance):記一組 `(entity_id, feature)` 即可,**第一版不追求完全重現當時的確切值**(insight 有 generated_at、每天全量重算,精確重現非必要需求)。精神同 observation_log 的 source_observation_id:讓 insight 可追溯
+
+*B. 架構 —— Pipeline Plugins(常駐 Orchestrator 定時批次調用)*
+
+- [ ] `InsightEngine` 管線 + `BaseInsightProducer` 基底類別;**實作者 = 純函數類別,不自己撈 DB**(可測試、可重現)
+- [ ] InsightEngine 把某 entity 在 knowledge_state 的所有 Facts 打包成記憶體 Context Dict → 丟給可插拔的實作者 List → 各實作者平行掃描這份字典吐出 insight 結構
+- [ ] 頭兩個實作者:`SKURuleProducer`(product_count > 500 → High SKU)、`GrowthStatProducer`(呼叫 Phase 2 時間序列查詢算最近 30 天 review 成長率 → Growth)
+- [ ] InsightEngine 把這批吐出的 insight 批次 upsert 寫入 insight_store;加新實作者只需加一個類別丟進 List(可插拔)
+
+*C. 排程 —— 每天 23:40 台灣獨立 daemon 全量重算*
+
+- [ ] 獨立 daemon(沿用既有 launchd 掛法,**獨立於 harvest / alarm / projection**),每天 23:40 台灣全量重算(第一版全量,沿用 Phase 2 精神:資料量小、全量快、天然冪等)
+- [ ] 每日處理鏈:Knowledge 投影(23:30)→ Insight 壓縮(23:40)→ 警鈴(23:50)
+
+*D. 描述 vs 預測界線(實作紅線,寫進實作紀律)*
+
+- [ ] **紅線判準(可操作):** 只要出現「下個月 / 即將 / 應該會」等隱含未來時間軸 + 帶賭注性質的推論 → 是預測 → **立即停修**(屬 Phase 3 Hypothesis)
+- [ ] **borderline:** `Highly Dependent`(如連續半年 uses_review_app='loox')**可作 Insight**(對歷史流水帳的描述壓縮);但引申「因為依賴,所以短期內不會換 App」= 預測 → **砍**。關鍵:同一事實,描述它是 Insight、從它引申未來是 Hypothesis
+
 ### ✅ 驗收(Acceptance)
 
 **狀態:** ⬜ 未驗收(Phase 尚未開始)
 
-**驗收條件:**
-- [ ] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者與來源
+**驗收條件(能力導向):**
+- [ ] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者(producer)與來源(source_knowledge_refs)
 - [ ] Insight 中沒有混入任何預測
+- [ ] value_text 受控一致(同一 insight_type 不同實作者不會吐出不一致寫法,如 High SKU / high_sku / HIGH)
+- [ ] source_knowledge_refs 記錄該 insight 基於哪幾條 (entity_id, feature) 事實(可追溯)
 
 **停止條件:** Insight 裡開始夾帶預測/賭注 → 停(Describe 與 Predict 混了)。
 
