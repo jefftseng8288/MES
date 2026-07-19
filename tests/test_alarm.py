@@ -8,6 +8,8 @@ from __future__ import annotations
 import random
 import uuid
 from collections.abc import AsyncGenerator
+from types import SimpleNamespace
+from typing import Any
 
 import pytest_asyncio
 from sqlalchemy import select
@@ -26,7 +28,6 @@ from mes.alarm import (
 from mes.config import get_settings
 from mes.db.models import AlertLog
 from mes.ingest import ingest_inferred_domain_failure, ingest_inferred_domain_success, ingest_seed
-from mes.notify import send_telegram
 
 
 @pytest_asyncio.fixture
@@ -109,9 +110,16 @@ def test_build_message_has_footer_and_no_auto_adjust() -> None:
 # --- notify: credential-gated no-op -----------------------------------------
 
 
-def test_send_telegram_noop_without_credentials() -> None:
-    # test env has no MES_TELEGRAM_* set -> graceful False, no raise
-    assert send_telegram("test") is False
+def test_send_telegram_noop_without_credentials(monkeypatch: Any) -> None:
+    # Force empty credentials (deterministic: don't depend on / actually hit the real .env
+    # bot — that would spam Telegram on every test run) -> graceful False, no raise.
+    import mes.notify as notify
+
+    monkeypatch.setattr(
+        notify, "get_settings",
+        lambda: SimpleNamespace(telegram_bot_token="", telegram_chat_id=""),
+    )
+    assert notify.send_telegram("test") is False
 
 
 # --- DB: load + record ------------------------------------------------------

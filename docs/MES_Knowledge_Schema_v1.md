@@ -37,17 +37,36 @@ knowledge_state {
   confidence               -- 該筆來源觀測的信心等級
   selection_rule_version   -- 此值是用哪版取值規則選出的(P5)
   updated_at               -- 本列最後被重算的時間
+  last_observed_at         -- 最後一次「成功」觀測的時間(= 被取為當前值那筆 observed 的 observed_at);
+                           --   nullable,NULL = 從無成功觀測(此時 value 依 CHECK 必全 NULL)
+  current_status           -- 最近一次「嘗試」觀測的結果,NOT NULL(observed/fetch_failed/not_found)
 }
 主鍵:(entity_id, feature) — 每個 entity 的每個 feature 只有一列「當前值」
 ```
 
-> 註:value 欄於 2026-07-11 Phase 1-B 實作階段細化為 discriminated union(單一 `value_normalized` 欄 → 依 `value_type` 分流的 typed 欄)。另 2026-07-11 Phase 1-C 加入 `producer` 欄。兩者皆為欄位實作細化,非設計變更,版號不動。
+> 註:value 欄於 2026-07-11 Phase 1-B 細化為 discriminated union;2026-07-11 Phase 1-C 加入 `producer` 欄;**2026-07-19 Phase 2(第一批)加入 `last_observed_at` + `current_status` 欄,並把 value CHECK 改為受 last_observed_at 條件化**(見下,由決定 2 導出)。皆為欄位實作細化,非設計變更,版號不動。
 
-**`producer` 欄(NOT NULL + CHECK,與 Observation_Log 同構)。** 投影時把來源觀測的 `producer`(mes_crawler_v1 / duckduckgo_v1 / manual_v1)一併帶上,讓「這個當前值由哪個方法/模型產生」在 Knowledge 層也追得到。定義與三欄分工見 `MES_Observation_Schema_v1.md` 第七節。
+**`producer` 欄(NOT NULL + CHECK,與 Observation_Log 同構)。** 投影時把來源觀測的 `producer`(mes_crawler_v1 / duckduckgo_v1 / mes_store_crawler_v1 / manual_v1)一併帶上。定義與三欄分工見 `MES_Observation_Schema_v1.md` 第七節。
 
 **value 欄與 Observation_Log 同構。** Knowledge_State 是 Observation_Log 的投影,值容器形狀必須一致(value_raw / value_text / value_number / value_boolean / value_json / value_entity_id 六欄),否則投影時要做型別轉換 —— 那正是腐敗點。
 
-**value 欄 CHECK 契約(與 code 一致):** Knowledge_State **無 status 欄**,只收 `status='observed'` 的來源投影,故無 failed / not_found 分支。其 CHECK:`value_raw` 非空(非 NULL 且 `btrim(value_raw) <> ''`)+ 正好一個與 `value_type` 相符的 typed 欄非空、其餘全空(對應規則同 Observation Schema §2)。
+### `last_observed_at` / `current_status` 與 fetch_failed 處理(決定 2,Phase 2)
+
+**決定 2 —— fetch_failed 保留舊值,但誠實標明新鮮度與當前狀態。** `fetch_failed` 是「系統失能」(被擋/斷網),不代表商家變了;若一次失敗就抹去舊值,狀態會隨網路波動閃爍歸零。故 knowledge_state 要能同時回答三件事:
+
+- **當前值是什麼** —— `value`(取自最新 observed,依決定 1)。
+- **這值最後一次成功觀測何時** —— `last_observed_at`(= 被取為當前值那筆 observed 的 observed_at)。
+- **最近一次嘗試觀測的結果** —— `current_status`(該 (entity, feature) 最近一筆 observation 的 status,不論成敗)。
+
+**關鍵:`value/last_observed_at` 與 `current_status` 是兩個不同時間點。** 例:product_count=196 於半年前 observed、今天去戳 fetch_failed → `value=196`、`last_observed_at=半年前`、`current_status=fetch_failed`。未來篩店可精準挑「last_observed_at 在 N 天內 **且** current_status=observed」的,自動過濾可能過期的。
+
+> 實作註記:`last_observed_at` 語義與既有 `observed_at`(「該筆來源觀測的時間」)**重疊** —— 兩者在當前設計下都等於「被取為當前值那筆 observed 的時間」。第一批依 Phase 2 設計文件先加 `last_observed_at`;是否與 `observed_at` 合併,待第二批(投影引擎)一併釐清。
+
+**value 欄 CHECK 契約(2026-07-19 改為受 last_observed_at 條件化;與 code 一致):** 原本 knowledge_state 只收 observed 投影、value 無條件必存在;決定 2 引入「保留舊值 + current_status」後,value 是否存在改由 `last_observed_at` 決定。DB 層 CHECK 物理鎖死合法組合(同 Observation_Log discriminated union 哲學,不信任投影代碼):
+
+- **規則 1(從無成功觀測):** `last_observed_at IS NULL` → `value` 必全 NULL(所有 typed 欄 + value_raw 皆 NULL)、且 `current_status` 只能 `fetch_failed` / `not_found`(不能 observed)。防「從沒成功卻有值」的鬼值。
+- **規則 2(曾成功觀測):** `last_observed_at IS NOT NULL` → `value` 必非 NULL(value_raw 非空 + 正好一個與 value_type 相符的 typed 欄非空、其餘全空);`current_status` 任意(observed=現在也成功 / fetch_failed=以前成功這次失敗 / not_found=現在確認沒有了)。防「曾成功卻沒值」的空洞。
+- `current_status` 受控三值 CHECK(沿用 observed/fetch_failed/not_found)。
 
 **`source_observation_id` 不可為空(不變)。** Knowledge_State 是衍生品,每個值必須能追回它的來源觀測 — 沒有它,這張表就是「不知道自己從哪來」的斷鏈表,違反 Provenance。
 
@@ -104,6 +123,16 @@ Default rule 不可能對所有 feature 都對:
 - Knowledge Engine 的工作 = 把 Observation_Log 投影成 Knowledge_State 的那個計算過程。
 - 更新模式:非同步批次重算(crawler 快速 append,Engine 定期投影)— 符合每日 crawler 的節奏,非即時系統。
 - **重建能力是驗收條件:** 給定 Observation_Log,必須能砍掉 Knowledge_State 全表並完整重建。此能力 = 「可回滾」在本層的具體形式。
+
+### Phase 2 第二批投影引擎實作落地(2026-07-19,`src/mes/knowledge.py`)
+
+- **全量重算(Jeff 定案):** 每次投影都清空 knowledge_state、把整個 observation_log 重跑。資料規模小(<百萬),全量快、天然冪等、最不易錯;日常投影 = 重建,順便驗證重建能力。不做增量。
+- **value(只看 observed)vs current_status(看全部):兩者掃不同子集** —— `value` 只從該 (entity, feature) 的 **observed** 子集依取值規則挑;`current_status` 從**所有觀測(含 fetch_failed/not_found)**取 observed_at 最新那筆的 status。故決定 2 場景成立:半年前 observed=196、今天 fetch_failed → `value=196`、`observed_at=半年前`、`current_status=fetch_failed`。
+- **純函數重建(鐵律):** 投影不使用任何 `now()` / `CURRENT_TIMESTAMP`;所有寫入的時間維度(`observed_at`、`updated_at`)100% 由 observation_log 的 `observed_at` 投影而來 → 同樣的 observation_log 今天投影與明天投影**完全一致**(冪等)。取值 tiebreaker 一路用 `observation_id` 收尾以確保決定性。
+- **`last_observed_at` 併回 `observed_at`(第一批冗餘欄合併):** 第一批加的 `last_observed_at`(= 被取為當前值那筆 observed 的時間)經投影驗證與既有 `observed_at` **恆等**(2905 列 0 不符),故第二批移除 `last_observed_at`,value 閘門 CHECK 改綁 `observed_at`(migration `e8d6f05d71b0`)。
+- **「從無 observed」不投影列(Jeff 定案 2026-07-19):** 只有 fetch_failed/not_found、從無成功觀測的 (entity, feature),**不投影** knowledge_state 列(而非投影一列無值列)—— knowledge_state 裡就是**查無此列**。因為無值列會逼 `observed_at` / `source_observation_id` 等 Provenance NOT NULL 欄放寬,動到鐵律;**保鐵律優先**,規則 1 的 CHECK 續當防禦守門。要知道「它為什麼沒值 / 試過幾次」→ 去查 observation_log(Append-Only 誠實記著所有失敗嘗試)。
+- **時間序列查詢** `feature_history(entity, feature)`:讀 observation_log(Append-Only 全歷史)的 observed 筆,依 observed_at 排序。knowledge_state = 當前值(查它);時間序列 = 歷史(查 observation_log)。
+- **投影排程:** 獨立 launchd `com.mes.projection`,每天 23:30 台灣全量投影(投影 23:30 → 警鈴 23:50,投影在前),獨立於 harvest / alarm daemon。
 
 ---
 

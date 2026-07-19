@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mes.projection</string>
+
+    <!-- Phase 2 投影引擎:每天 23:30 台灣全量重算 knowledge_state,然後退出。
+         順序:投影 23:30 -> 警鈴 23:50(投影在前,先收斂當天 observation 再體檢)。
+         獨立於 harvest / alarm daemon —— 不綁死彼此生命週期。 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/cashflow/Documents/MES/.venv/bin/python</string>
+        <string>-m</string>
+        <string>mes.knowledge</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/cashflow/Documents/MES</string>
+
+    <!-- StartCalendarInterval fires in the machine's LOCAL time (Taiwan, UTC+8).
+         23:30 local = 23:30 台灣. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>23</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <!-- One-shot: do not run at load, do not keep alive; just fire on schedule. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/cashflow/Documents/MES/logs/projection.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/cashflow/Documents/MES/logs/projection.err.log</string>
+</dict>
+</plist>

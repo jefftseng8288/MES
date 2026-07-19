@@ -128,3 +128,15 @@
 
 - **接外部推送服務(Telegram)要 credential-gated + 永不 raise(2026-07-17)。**
   MES 原本零接 Telegram(獨立專案,不繼承 EF_WorkFlow)。接上時:憑證(bot token / chat_id)缺就 **graceful no-op**(記 log、回 False),不是報錯——因為警鈴的 DB 記錄不該因「還沒設推送」而失敗;且推送本身**永不 raise**(用 try/except 包住 HTTP),一次推播失敗不能中斷整個巡檢。分層:偵測+記錄(核心,一定要成功)vs 推送(盡力而為,可失敗)。
+
+- **投影引擎:`value` 與 `current_status` 掃的是不同子集(2026-07-19 Phase 2 第二批,核心設計)。**
+  同一 (entity, feature),`value` 只從 **observed 子集**依取值規則挑(時間優先);`current_status` 從 **全部觀測(含 fetch_failed/not_found)** 取最新那筆的 status。這是決定 2 能成立的關鍵——半年前 observed=196、今天 fetch_failed → `value=196`(值不因網路波動歸零)、`observed_at=半年前`(誠實標新鮮度)、`current_status=fetch_failed`(誠實標最近一次沒抓到)。**若兩者掃同一子集就會退化**:只看 observed → current_status 永遠是 observed(看不到失敗);只看全部 → value 會被失敗筆的空值污染。真實資料驗證:2 列 value 保留 + current_status=fetch_failed。教訓:「當前值」與「當前狀態」是**兩個不同的問題**,要用兩個不同的掃描回答。
+
+- **純函數重建禁用系統時間——重建冪等靠「時間全從資料投影」(2026-07-19 Phase 2)。**
+  投影/重建**不准用 `now()` / `CURRENT_TIMESTAMP`**:所有寫入 knowledge_state 的時間維度(`observed_at` = 被取那筆 observed 的時間、`updated_at` = 最新一筆觀測的時間)100% 由 observation_log 的 `observed_at` 投影而來。理由:重建能力是驗收條件,而「砍表重建後與重建前完全一致」只有在**輸出不依賴執行當下的牆鐘**時才成立。連 tiebreaker 都要決定性——同 observed_at 同 confidence 時用 `observation_id`(穩定 UUID)收尾,否則 set 迭代序不同會讓兩次投影挑到不同筆。教訓:**要冪等的投影,任何「執行當下才知道的值」(牆鐘、隨機、迭代序)都是污染源,一律改由輸入資料決定。**
+
+- **冗餘欄先驗證恆等再合併,不憑假設直接刪(2026-07-19 Phase 2,順序紀律)。**
+  第一批加的 `last_observed_at`(= 被取為當前值那筆 observed 的時間)語義疑似與既有 `observed_at` 完全相同。合併前**先把投影邏輯寫出來、實跑、SQL 驗證兩欄在所有列恆等**(2905 列 0 不符),確認後才 migration 移除 `last_observed_at`、CHECK 改綁 `observed_at`。**順序不可反**——若一開始就假設恆等直接刪欄,萬一有場景不等(如未來若投影「無值列」,無值列的 observed_at 語義會與 last_observed_at 分岔)就會靜默丟資料。教訓:**刪任何「看起來多餘」的欄前,先讓真實資料證明它多餘。**
+
+- **投影「無值列」會逼放寬 Provenance NOT NULL 鐵律——Jeff 定案:不建無值列、保鐵律(2026-07-19 Phase 2,鐵律 vs 效益的權衡)。**
+  「從無成功觀測、只有失敗」的 (entity, feature) 若要投影一列(value 全 NULL + current_status),會逼 `source_observation_id` / `observed_at` / `confidence` / `producer` / `selection_rule_version` 五個 NOT NULL 欄(其中 source_observation_id 是 Phase 0 Provenance 鐵律)全部改 nullable——因為這些欄都是「描述當前值」的,無值時無意義。判斷:**放寬鐵律是動到資料層硬約束的大事,不由實作單方決定**——攤開 (A) 不建無值列保鐵律 / (B) 改投影無值列(需一組欄 nullable + gated CHECK)兩個選項給 Jeff。**Jeff 定案 (A):不建無值列。** knowledge_state 只答「當前已知值」,從無 observed 就是**查無此列**;要看「為何沒值 / 試過幾次」去查 observation_log(Append-Only 誠實記著所有失敗)。職責分工:knowledge_state = 當前值,observation_log = 完整歷史含失敗。教訓:遇到「要達成某功能就得鬆一條硬約束」時,**先停下來把選項和代價攤開給人決定,不要為了功能完整度默默鬆綁鐵律。**

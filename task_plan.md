@@ -191,7 +191,7 @@
 
 ## Phase 2 — Knowledge Engine(Observation 正規化為可查詢 Knowledge)
 
-**狀態:** 未開始
+**狀態:** ✅ 能力達成(第一批 schema+CHECK、第二批投影引擎/取值/country/時序/排程/純函數重建皆完成,2026-07-19)。「從無 observed 不投影無值列」已由 Jeff 定案(保 Provenance 鐵律;查無此列 → 去 observation_log 看失敗歷史)
 
 **目的:** 把流水帳般的 Observation 收斂成「誠實反映流動現況」的、中立的、可查歷史的 Knowledge 層。
 
@@ -207,51 +207,56 @@
 
 **工作項目:**
 
-*A. knowledge_state schema 擴充(由決定 2 導出;趁空表擴充成本近零)*
+*A. knowledge_state schema 擴充(由決定 2 導出;趁空表擴充成本近零)* — ✅ 第一批完成(2026-07-19)
 
-- [ ] knowledge_state 加 `last_observed_at`(timestamp)+ `current_status`(受控字串 CHECK,沿用三值)
-- [ ] knowledge_state **DB 層 CHECK**(物理鎖死合法狀態組合,不信任投影代碼):
-  - `last_observed_at IS NULL` → value 必 NULL(所有 typed 欄 + value_raw 皆 NULL)、`current_status` 只能 fetch_failed / not_found(防「從沒成功卻有值」的鬼值)
+- [x] knowledge_state 加 `last_observed_at`(timestamptz,nullable)+ `current_status`(String(16),NOT NULL,受控三值 CHECK)。migration `5c7e8387b736`(空表 TRUNCATE 後擴充;down→up 回滾已驗)
+- [x] knowledge_state **DB 層 CHECK**(物理鎖死合法狀態組合,不信任投影代碼):
+  - `last_observed_at IS NULL` → value 必 NULL(所有 typed 欄 + value_raw 皆 NULL)、`current_status` 只能 fetch_failed / not_found(防「從沒成功卻有值」的鬼值)—— 既有無條件 value CHECK 改為受 last_observed_at 條件化
   - `last_observed_at IS NOT NULL` → value 必非 NULL、`current_status` 任意(防「曾成功卻沒值」的空洞)
-- [ ] 同步更新 `docs/MES_Knowledge_Schema_v1.md`(加這兩欄 + 語義 + 決定 2 理由;並修正 §3 舊述「country 覆寫為 confidence 優先」為決定 1 + country 特例的精確定義)—— 於實作時做
+- [x] 同步更新 `docs/MES_Knowledge_Schema_v1.md`(加兩欄 + 語義 + 決定 2 理由 + 兩條 CHECK 規則);§3 country 舊述已於前批(commit be6280c)修正為決定 1 + country 特例
+- [x] 測試(真連 DB):7 個 CHECK 測試(規則 1/2 各違反被拒 + 合法可寫 + current_status 受控);既有 knowledge 測試更新 `_ks`(加兩欄)後全過
 
-*B. 投影引擎(Knowledge Engine 核心)*
+> **註(設計 vs 本地 schema 差異,已回報):** `last_observed_at` 語義與 knowledge_state 既有 `observed_at` 欄(「該來源觀測的時間」)**重疊**——當前設計下兩者都等於「被取為當前值那筆 observed 的時間」。依 Phase 2 設計文件先加 `last_observed_at`;是否與 `observed_at` 合併,留待第二批(投影引擎)一併釐清。
 
-- [ ] 實作投影:讀 observation_log,對每個 `(entity_id, feature)` 依取值邏輯算出 knowledge_state 一列
-- [ ] 取值邏輯(依決定 1、2):候選=該組合所有 observed → 取 observed_at 最新(同時間才 confidence tiebreaker)寫 value/value_type/typed 欄/source_observation_id/last_observed_at;`current_status` = 該組合最近一筆 observation(不論成敗)的 status;若從無 observed → 不投影出值,但可記 current_status
-- [ ] **country 特例(Jeff 定案):時間優先,但「低 confidence 的新值不覆蓋高 confidence 的舊值」**(剛性事實不被猜測污染:新 inferred 擋不住舊 certain,如 IP 猜的伺服器國 ≠ 註冊國)。**第一版只套 country**,不預先推廣到其他 feature
-- [ ] Normalize(單位統一:幣別、時間格式),**只正規化,不做任何判斷/評分**
-- [ ] 守 P2 中立(鐵律):投影/Normalize 絕不標「高價值/高風險」、不排序、不評分
+*B. 投影引擎(Knowledge Engine 核心)* — ✅ 第二批完成(2026-07-19,`src/mes/knowledge.py`)
 
-*C. 投影排程(依決定 3)*
+- [x] 實作投影(全量重算,Jeff 定案):讀 observation_log 全部 → 清空 knowledge_state → 逐 `(entity_id, feature)` 投影 → 寫入(`rebuild_knowledge_state`)。真實資料 3151 (entity,feature) 組投影出對應列
+- [x] 取值邏輯(決定 1、2):observed 子集取 observed_at 最新(同時間 confidence tiebreaker → observation_id 收尾);`current_status` = **全部觀測**(含失敗)最新那筆 status(與 value 掃**不同子集**)。決定 2 場景於真實資料成立(2 列 value 保留 + current_status=fetch_failed)
+- [x] **country 特例(Jeff 定案 B 版):時間序 fold,新值 confidence ≥ 現行才覆蓋**(新 inferred 擋不住舊 certain)。`selection_rule_version=country_v1`(14 列),其餘 `default_v1`。**第一版只套 country**
+- [x] value 容器直接投影(同構,不做型別轉換);Normalize 於觀測層已做,投影**只取值不判斷**
+- [x] 守 P2 中立(鐵律):knowledge_state 無任何評分/排序/判斷欄(測試 `test_no_scoring_columns` 守門)
+- [x] **合併第一批冗餘欄:** 投影驗證 `last_observed_at ≡ observed_at`(2905 列 0 不符)→ 移除 `last_observed_at`,CHECK 改綁 `observed_at`(migration `e8d6f05d71b0`)
+- [x] **「從無 observed」不投影列(Jeff 定案 2026-07-19):** 只有失敗、從無成功觀測的組合 → knowledge_state **查無此列**(而非投影無值列)。理由:無值列會逼 observed_at / source_observation_id 等 Provenance NOT NULL 欄放寬(動鐵律),**保鐵律優先**;規則 1 CHECK 續當防禦守門。要知道「為何沒值 / 試過幾次」→ 查 observation_log(那裡誠實記著所有失敗嘗試)
 
-- [ ] 定時批次每天 **23:30 台灣**,獨立 daemon(launchd,**獨立於 harvest / alarm**,不綁死)
-- [ ] 順序:先投影(23:30)→ 再警鈴(23:50)
+*C. 投影排程(依決定 3)* — ✅ 完成
 
-*D. 時間序列查詢*
+- [x] 定時批次每天 **23:30 台灣**,獨立 daemon `deploy/com.mes.projection.plist`(launchd,**獨立於 harvest / alarm**,one-shot)
+- [x] 順序:先投影(23:30)→ 再警鈴(23:50)
 
-- [ ] 支援查詢「某 entity 的某 feature 隨時間的變化序列」——直讀 observation_log(Append-Only 全歷史)依 observed_at 排序;當前值查 knowledge_state、歷史查 observation_log
+*D. 時間序列查詢* — ✅ 完成
 
-*E. 重建能力 + 純函數性*
+- [x] `feature_history(entity, feature)`:直讀 observation_log(Append-Only 全歷史)的 observed 筆依 observed_at 排序;當前值查 knowledge_state、歷史查 observation_log
 
-- [ ] 可砍掉 knowledge_state 全表並從 observation_log 完整重建;重建與日常投影**共用同一套取值邏輯**
-- [ ] **純函數重建:投影/重建禁用 `now()` / `CURRENT_TIMESTAMP`**;所有寫入 knowledge_state 的時間維度(last_observed_at 等)100% 由對應 observation_log 的 `observed_at` 投影而來(確保重建冪等:今天重建與明天重建結果一致)
+*E. 重建能力 + 純函數性* — ✅ 完成
+
+- [x] 全量投影 = 砍表重建,重建與日常投影**同一套邏輯**;連跑兩次 knowledge_state 完全一致(`test_rebuild_idempotent_and_projects_expected`)
+- [x] **純函數重建:投影禁用 `now()` / `CURRENT_TIMESTAMP`**;所有寫入的時間維度(`observed_at`、`updated_at`)100% 由 observation_log 的 `observed_at` 投影而來,tiebreaker 用 `observation_id` 收尾 → 冪等
 
 > **效能備註(非工作項):** 現階段規模(Shopify 全站據所知未破百萬,knowledge_state 頂多幾十萬列)本地 PostgreSQL 全表掃即毫秒級,**不預先加索引**(過度優化)。若未來投影**實測**變慢,第一順位候選 = observation_log 的 `(entity_id, feature, observed_at)` 複合索引(最大表、投影分群挑最新值最高頻打的地方)。knowledge_state 的 (entity_id, feature) 複合主鍵已自帶唯一索引。
 
 ### ✅ 驗收(Acceptance)
 
-**狀態:** ⬜ 未驗收(Phase 尚未開始)
+**狀態:** ✅ 能力達成(2026-07-19,第二批完成;97 測試全過)。「從無 observed → 不投影無值列」已由 Jeff 定案(保 Provenance 鐵律;見 B 組)。
 
-**驗收條件(能力導向):**
+**驗收條件(能力導向)—— 逐條對照實際測試:**
 
-- [ ] 能對一個 (entity, feature) 依「時間優先」取出當前值(決定 1 生效)
-- [ ] fetch_failed 時保留舊值 + 誠實標明 last_observed_at / current_status(決定 2 生效)
-- [ ] DB CHECK 物理拒絕不老實的混合狀態(last_observed_at IS NULL 卻有 value 等 → 被擋)
-- [ ] country 特例生效:低 confidence 的新 inferred 不覆蓋高 confidence 的舊 certain(剛性事實不被猜測污染)
-- [ ] 能查詢某 entity 某 feature 隨時間的變化序列(Append-Only 歷史讀得出來)
-- [ ] 可砍掉 knowledge_state 全表並從 observation_log 完整重建,**且重建後與砍之前完全一致**(純函數性;禁用系統時間)
-- [ ] 投影/Normalize 全程中立,無任何判斷/評分(守 P2)
+- [x] 能對一個 (entity, feature) 依「時間優先」取出當前值(決定 1)—— `test_time_priority_new_inferred_beats_old_certain` / `test_same_time_confidence_tiebreaker`
+- [x] fetch_failed 時保留舊值 + 誠實標明 observed_at(新鮮度)/ current_status(決定 2)—— `test_decision2_fetch_failed_keeps_old_value`;真實資料 2 列成立
+- [x] DB CHECK 物理拒絕不老實的混合狀態(observed_at IS NULL 卻有 value、observed_at 有值卻無 value 等 → 被擋)—— `test_phase2_knowledge_state.py` 全數
+- [x] country 特例生效:低 confidence 的新 inferred 不覆蓋高 confidence 的舊 certain —— `test_country_new_inferred_does_not_override_old_certain` / `test_country_new_certain_overrides_old_certain`
+- [x] 能查詢某 entity 某 feature 隨時間的變化序列(Append-Only 歷史)—— `test_feature_history_sorted`
+- [x] 可砍掉 knowledge_state 全表並從 observation_log 完整重建,**且重建後與砍之前完全一致**(純函數;禁用系統時間)—— `test_rebuild_idempotent_and_projects_expected`
+- [x] 投影全程中立,無任何判斷/評分(守 P2)—— `test_no_scoring_columns`
 
 **停止條件:** Normalize 混入判斷/評分 → 違反 P2,停;歷史查不出來 → Append-Only 沒生效,停;fetch_failed 抹去舊值(狀態閃爍歸零)→ 違反決定 2,停;重建結果隨執行時間浮動(用了系統時間)→ 違反純函數性,停。
 

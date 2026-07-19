@@ -156,9 +156,23 @@ _OBS_TYPED_CHECK = (
     f"(status = 'observed' AND ({_exactly_one_typed()})) "
     f"OR (status IN ('fetch_failed', 'not_found') AND {_all_typed_null()})"
 )
-# knowledge_state: only projects status='observed' rows; no status column, no failed branch.
-_KNOWLEDGE_VALUE_RAW_CHECK = "value_raw IS NOT NULL AND btrim(value_raw) <> ''"
-_KNOWLEDGE_TYPED_CHECK = _exactly_one_typed()
+# knowledge_state (Phase 2, 決定 2): value presence is gated by observed_at.
+#   observed_at = 被取為當前值那筆 observed 的時間(= 值的新鮮度)。第二批把冗餘的 last_observed_at
+#   併回 observed_at(投影驗證兩者恆等,2905 列 0 不符)。
+#   observed_at IS NULL     -> 從無成功: value 全 NULL,current_status ∈ failed/not_found(防禦守門;
+#                             observed_at 保持 NOT NULL,v1 不建無值列,保留 Provenance 鐵律)。
+#   observed_at IS NOT NULL -> 曾成功: value 必非 NULL(discriminated union)。
+# 同 observation_log 哲學:DB 物理拒絕不老實的混合狀態(投影代碼寫錯也擋得住)。
+_KNOWLEDGE_VALUE_RAW_CHECK = (
+    "(observed_at IS NULL AND value_raw IS NULL) "
+    "OR (observed_at IS NOT NULL AND value_raw IS NOT NULL AND btrim(value_raw) <> '')"
+)
+_KNOWLEDGE_TYPED_CHECK = (
+    f"(observed_at IS NULL AND {_all_typed_null()}) "
+    f"OR (observed_at IS NOT NULL AND ({_exactly_one_typed()}))"
+)
+# 從無成功觀測(observed_at IS NULL)時 current_status 不能是 observed(observed 蘊含曾成功)。
+_KNOWLEDGE_STATUS_CONSISTENCY_CHECK = "observed_at IS NOT NULL OR current_status <> 'observed'"
 
 
 class Entity(Base):
@@ -238,8 +252,12 @@ class KnowledgeState(Base):
         CheckConstraint(_sql_in("value_type", VALUE_TYPES), name="ck_knowledge_value_type"),
         CheckConstraint(_sql_in("producer", PRODUCERS), name="ck_knowledge_producer"),
         CheckConstraint(_sql_in("confidence", CONFIDENCE_LEVELS), name="ck_knowledge_confidence"),
+        CheckConstraint(_sql_in("current_status", STATUSES), name="ck_knowledge_current_status"),
         CheckConstraint(_KNOWLEDGE_VALUE_RAW_CHECK, name="ck_knowledge_value_raw"),
         CheckConstraint(_KNOWLEDGE_TYPED_CHECK, name="ck_knowledge_value_typed"),
+        CheckConstraint(
+            _KNOWLEDGE_STATUS_CONSISTENCY_CHECK, name="ck_knowledge_status_consistency"
+        ),
     )
 
     # 複合主鍵 (entity_id, feature)
@@ -273,6 +291,13 @@ class KnowledgeState(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=_now, onupdate=_now
     )
+    # --- Phase 2 (決定 2) --------------------------------------------------------
+    # current_status = 最近一次「嘗試」觀測的結果(可能是比 observed_at 更晚的一次 fetch_failed)。
+    # 與 value/observed_at 是不同時間點:值(及其 observed_at 新鮮度)可舊、狀態反映最新一次嘗試。
+    # 例:product_count=196 於半年前 observed、今天 fetch_failed → value=196、observed_at=半年前、
+    #     current_status=fetch_failed(保留舊值 + 誠實標明當前狀態)。NOT NULL。
+    # 註:第二批已把第一批的 last_observed_at 併回 observed_at(投影驗證兩者恆等)。
+    current_status: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
 class StoreHarvestState(Base):

@@ -84,6 +84,8 @@ def _ks(entity_id: uuid.UUID, source_observation_id: uuid.UUID, **overrides: Any
         "observed_at": _now(),
         "confidence": "certain",
         "selection_rule_version": "default_v1",
+        # Phase 2: has a value -> observed_at (the value gate) non-null; current_status observed.
+        "current_status": "observed",
     }
     base.update(overrides)
     return KnowledgeState(**base)
@@ -186,9 +188,9 @@ async def test_knowledge_source_observation_id_not_null_rejected(session: AsyncS
                 "INSERT INTO knowledge_state "
                 "(entity_id, feature, value_type, value_raw, value_number, producer, "
                 " source_observation_id, observed_at, confidence, selection_rule_version, "
-                " updated_at) "
+                " updated_at, current_status) "
                 "VALUES (:eid, 'product_count', 'number', '42', 42, 'mes_crawler_v1', NULL, "
-                " now(), 'certain', 'v1', now())"
+                " now(), 'certain', 'v1', now(), 'observed')"
             ),
             {"eid": store.entity_id},
         )
