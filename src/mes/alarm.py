@@ -168,6 +168,19 @@ def build_message(taiwan_date: str, alerts: list[Alert]) -> str:
     return "\n".join(lines)
 
 
+def build_heartbeat(taiwan_date: str, batches: list[BatchStats]) -> str:
+    """無警鈴時的每日安好摘要 —— 心跳,證明 daemon 有跑、三批數字健康。"""
+    lines = [f"✅ [MES 每日安好] {taiwan_date}", ""]
+    for b in batches:
+        if b.exists:
+            lines.append(f"{SLOT_LABELS[b.slot]}:seeds {b.seeds} / observed {b.observed}")
+        else:
+            lines.append(f"{SLOT_LABELS[b.slot]}:(無記錄)")
+    lines.append("")
+    lines.append("三批皆正常,無警鈴。")
+    return "\n".join(lines)
+
+
 async def _record(session: AsyncSession, taiwan_date: str, alert: Alert, delivered: bool) -> None:
     session.add(AlertLog(
         taiwan_date=taiwan_date, alert_type=alert.alert_type,
@@ -182,7 +195,10 @@ async def run_alarm_check(
     session_maker: async_sessionmaker[AsyncSession] | None = None,
     send: bool = True,
 ) -> list[Alert]:
-    """巡檢當天三批。有異常才推 Telegram + 記 DB;沒異常安靜。回傳觸發的 Alert。"""
+    """巡檢當天三批。有異常 → 推警鈴 + 記 alert_log;無異常 → 推每日安好摘要(心跳,不記 DB)。
+
+    回傳觸發的 Alert(無異常回空 list)。
+    """
     if taiwan_date is None:
         taiwan_date = datetime.now(_TAIPEI).date().isoformat()
     engine = None
@@ -194,7 +210,12 @@ async def run_alarm_check(
             batches = await load_today_batches(session, taiwan_date)
             alerts = evaluate(batches)
             if not alerts:
-                logger.info("[alarm] %s 無異常,安靜。", taiwan_date)
+                # 無異常也主動回報一則「安好摘要」當心跳(證明 daemon 活著)。
+                # 心跳不是異常,不寫 alert_log(alert_log 保持只記異常)。
+                heartbeat = build_heartbeat(taiwan_date, batches)
+                delivered = send_telegram(heartbeat) if send else False
+                logger.info("[alarm] %s 無異常,推每日安好摘要 delivered=%s", taiwan_date, delivered)
+                print(heartbeat)
                 return []
             message = build_message(taiwan_date, alerts)
             delivered = send_telegram(message) if send else False

@@ -20,6 +20,7 @@ from mes.alarm import (
     ALERT_SUPPLY_LOW,
     ALERT_ZERO_OBSERVED,
     BatchStats,
+    build_heartbeat,
     build_message,
     evaluate,
     load_today_batches,
@@ -174,7 +175,7 @@ async def test_run_alarm_check_records_when_fired_and_silent_otherwise(
     assert all(r.delivered is False for r in rows)
     assert rows[0].detail is not None and "batches" in rows[0].detail
 
-    # A healthy day -> no alerts, no records.
+    # A healthy day -> no alerts, no records (heartbeat is sent but not recorded to alert_log).
     day2 = _uniq_date()
     await _seed_batch(session, f"{day2}-01", observed=30, not_found=0, fetch_failed=0)
     await _seed_batch(session, f"{day2}-02", observed=30, not_found=0, fetch_failed=0)
@@ -185,3 +186,18 @@ async def test_run_alarm_check_records_when_fired_and_silent_otherwise(
         select(AlertLog).where(AlertLog.taiwan_date == day2)
     )).scalars().all()
     assert rows2 == []
+
+
+def test_build_heartbeat_summarises_three_batches() -> None:
+    batches = [
+        BatchStats(slot=1, batch_id="2099-01-01-01", exists=True, seeds=30, observed=28,
+                   not_found=0, fetch_failed=0),
+        BatchStats(slot=2, batch_id="2099-01-01-02", exists=True, seeds=25, observed=27,
+                   not_found=0, fetch_failed=0),
+        BatchStats(slot=3, batch_id="2099-01-01-03", exists=True, seeds=22, observed=24,
+                   not_found=0, fetch_failed=0),
+    ]
+    msg = build_heartbeat("2099-01-01", batches)
+    assert "每日安好" in msg and "2099-01-01" in msg
+    assert "02:00:seeds 30 / observed 28" in msg
+    assert "無警鈴" in msg
