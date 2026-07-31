@@ -265,6 +265,7 @@
 ## Phase 2.5 — Insight Engine(資訊降維 / 語義壓縮)
 
 **狀態:** ✅ 能力達成(第一批 insight_store + registry、第二批 InsightEngine / 兩個 Producer / 執行報告表 / 23:40 排程皆完成,2026-07-19)
+> **⚠️ 但有一個資料源缺口:`GROWTH_VELOCITY` 目前無資料源、對真實資料永遠產出 0 筆** —— `review_count` 未納入採集(見驗收處說明)。**能力達成 ≠ 現在有東西可產出**,兩者要分開看。
 
 **目的:** 把 Knowledge 濃縮成「描述看到了什麼」的 Insight。這是 **Describe**,不是 Predict。
 
@@ -316,9 +317,10 @@
 ### ✅ 驗收(Acceptance)
 
 **狀態:** ✅ 能力達成(2026-07-19,第二批完成;143 測試全過。真實資料實跑:758 家 store → 548 筆 SKU_SCALE)
+> **⚠️ 但 `GROWTH_VELOCITY` 目前無資料源:`review_count` 未納入採集,對真實資料永遠產出 0 筆。** 待 `review_count` 納入採集後才會有真實產出(見下方說明)。**這個 ✅ 只代表「給它資料算得對」,不代表「現在有資料可算」。**
 
 **驗收條件(能力導向)—— 逐條對照實際測試:**
-- [x] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者(producer)與來源(source_knowledge_refs)—— 真實資料 548 筆 SKU_SCALE(547 Low / 1 Medium),每筆帶 `rule_v1` + refs
+- [x] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者(producer)與來源(source_knowledge_refs)—— **Rule:** 真實資料 548 筆 SKU_SCALE(547 Low / 1 Medium),每筆帶 `rule_v1` + refs;**Statistics:** 計算能力以測試資料驗證通過,但**真實產出 0 筆(無資料源,見下)**
 - [x] Insight 中沒有混入任何預測 —— `test_no_prediction_columns_in_insight_store`;Producer 只做當前事實/歷史的描述壓縮
 - [x] value_text 受控一致 —— 列舉型擋 `high_sku`/`HIGH SKU`;數值型擋非數值(`test_numeric_type_accepts_numbers_rejects_labels`)
 - [x] source_knowledge_refs 記錄基於哪幾條 (entity_id, feature) 事實 —— 真實資料與測試皆驗證
