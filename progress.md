@@ -6,6 +6,74 @@
 
 ---
 
+## 2026-07-31 — Phase 2.5 完成 → 揭開四條鏈路裡三條靜默失效 → 五步修復 + 採集擴充
+
+> 這天的形狀:**做完 Phase 2.5,它暴露了一個缺口;順著缺口查下去,發現系統遠比想像中壞。**
+> 而且是「看起來一切正常」的壞法 —— 警鈴每天回報正常,因為它看的正好是唯一正常的那條鏈路。
+
+### 1. Phase 2.5 Insight Engine 完成(commit `7cb16af`)
+
+- **第一批(資料層):** `insight_store` 表(`(entity_id, insight_type)` UNIQUE → **insight_id 穩定不重生成**,Phase 3 的 Hypothesis 才引用得住)+ 應用層受控 registry。
+- **第二批(核心):** `InsightEngine` + `BaseInsightProducer` + `SKURuleProducer`(≤100/101–500/>500 三級)+ `GrowthStatProducer` + 23:40 排程 + `insight_run_log`(記「為什麼沒產出」)。
+- **Producer 純函數但需歷史 → 由 Engine 統一撈:** Producer 只「聲明」需要什麼,Engine 打包成記憶體 Context 交給它,Producer 碰不到 DB。
+- 補上第一批漏的 **producer 應用層受控**(它是 Provider 競技場的計分主體,寫法不一致計分板就壞了)。
+- **兩個定案的理由(不是實作細節,是判準):**
+  - `generated_at` 用 `now()` —— 判準是「**這個時間在描述什麼**」:knowledge 的 `observed_at` 描述「事實何時被觀測」(歷史事實,禁用系統時間);insight 的 `generated_at` 描述「描述何時被產生」(本來就是執行時間)。**不是無差別禁令。**
+  - 受控放 DB 還是應用層 —— 用「**穩不穩定**」決定:confidence 三級(Phase 0 既定)→ DB CHECK;insight 標籤(演化中)→ 應用層 registry。**同一張表刻意兩種待遇。**
+
+### 2. 缺口 → 一路挖出系統性失效(commit `e0f5b74` 先標記缺口)
+
+- `GROWTH_VELOCITY` 對真實資料產出 0 —— 但原因**不是「還沒累積夠 30 天」,是 `review_count` 根本不在 Feature Taxonomy 的 9 個 feature 內**(源頭沒開,永遠不會有)。先把這個缺口標進文件,**不讓它被 Phase 2.5 的 ✅ 蓋住**。
+- 查 review_count 的樣本 → 發現**只有 2 家真實店有 uses_review_app**,再查 → **594 家真實 store 只 harvest 過 6 家**。
+- 診斷(區分「沒觸發 / 有觸發沒挑到 / 挑到了但失敗」三種):**是第三種的變形** —— daemon 有跑(125 批、16 天),但**每批都挑同樣 3 家假網域**(head-of-line blocking)。
+- 同時發現 **`projection` / `insight` 兩個 daemon 從未被 `launchctl load`** —— plist 寫好放在 repo 裡,但沒掛上去。
+- **四條鏈路裡三條沒在做該做的事,而警鈴恰好只監測了正常的那條(baseline)。**
+
+### 3. 五步修復(commit `e7ef1c3`)
+
+1. **load 兩個 daemon** —— 並用 `launchctl kickstart` 驗證整條路徑(程序真起來、log 真寫入、DB 真多列),不是只確認「已 load」。
+2. **測試改用獨立 DB**(`mes_test`,每 session 重建 schema)—— 測試檔一行未改(因為 `get_settings()` 本來就每次重讀環境變數)。硬指標:跑完 143 個測試,**正式 DB 計數完全不變**。
+3. **清理正式 DB 的測試資料** —— 5535 個 entity + 8781 筆觀測(先 `pg_dump` 備份;Append-Only trigger 交易內停用後**立即恢復並實測仍在擋**)。store entity 4092 → 592。
+4. **修 harvest** —— 排序改「最久沒嘗試優先」(天然退避)、`done` 納入候選(**這才讓時間序列成立**)、最小重抓間隔 7 天、批量 3→15(限流是 per-domain,與 baseline 性質不同)。
+5. **心跳 + 警鈴擴充** —— `job_run_log`(產出為 0 也記)+ 三個新警鈴(沒跑 / 報錯 / 產出異常為 0,且**排除正常閒置**)+ 每日安好加四條鏈路狀態。
+
+**★ 整條鏈路首次真正打通:** 真實店 → 12 個 feature → Knowledge → Insight,不靠測試資料、不靠手動觸發。首批 12 筆 SKU_SCALE 來自真實市場資料。
+
+### 4. 採集能力擴充:review_count / avg_rating / rating_distribution(同 commit `e7ef1c3`)
+
+- **先探通用抓法** —— schema.org `aggregateRating`,11 家真實店實測:覆蓋率 1/11,**且那筆是單一商品的評論數、不是全店** → **不可行,且刻意不當 fallback**(寧可沒有,也不要語義錯誤的資料)。
+- 改**通用入口 + per-app handler 可插拔**,目前只有 loox handler(其餘四個 app 樣本仍不足,不憑想像寫)。
+- **實測打臉三個假設:** widget id 有**第三種** markup(JSON 跳脫斜線)、widget 頁**可見文字會在地化**(西班牙店顯示 `Reseñas`,寫死英文會漏掉所有非英文店)、位置式解析在小店會抓錯(改結構式)。**其中第三個是靠「分佈加總 = 總數」的驗算自己暴露的。**
+- Feature Taxonomy **v1 → v2**;`source` 新增 `review_widget`(評論數來自第三方 widget 頁,不是店家 `html_page` —— 借舊值 = 在來源追溯上說謊);`producer` **不新增**(管道由 source 承載、哪個 app 由 `uses_review_app` 承載)。
+
+### 5. Seed 供給的三個病(commit `bf56b75` + `2a4cfb4`)
+
+- **供給** —— 加 5 個「有規模才會裝」的非 review 類來源(klaviyo / smile / loyaltylion / seal_subscriptions / weglot)。實跑 **30/30 恢復**(原本 4/0/0/2),**總請求數反而從約 60 降到 8**(round-robin 更容易在 page 1 湊滿即停)。
+- **★ 視野** —— `MAX_PAGES = 12`,但實測各來源**第 25 頁都還是滿的**(loox 第 40 頁仍有)→ **池子從來沒乾,是我們自己設了視野邊界**,並把「視野內看完了」誤讀成「市場沒有了」。**這個誤讀已發生兩次。** 根因不是數值而是**觸頂沒有訊號**:改 `MAX_PAGES=2000`(刻意設在正常到不了處 → 觸頂即高信度異常訊號)+ 單批 5 小時煞車 + `GatherOutcome.stop_reason` 讓「我們的上限」與「市場真的沒了」**在型別上分開** + 觸頂主動推 Telegram。
+- **併發** —— `max_instances` 是 **per-job**,三個 slot 是三個 job,擋不住 21:00 那批還在跑時 02:00 啟動(而兩者間隔剛好 5 小時 = 時間煞車長度)。加跨 slot `asyncio.Lock`,選「等待」而非「跳過」。
+- 順帶:`observed_on_app_store` 來源標記大小寫統一(120+82 → **202**),並在寫入端加 `normalize_source_label()` 單一入口(不依賴呼叫端自律)。
+
+### 當日結束時的真實數字
+
+| 項目 | 值 |
+|---|---|
+| store entity(全為真實) | 592 |
+| seed entity | 754 |
+| observation_log | 1961 |
+| harvest 過的 store | 44(修復前 6) |
+| review_count 觀測 | 6 家(7 ~ 1590 則) |
+| knowledge_state | 1598 |
+| insight_store | 12(全來自真實店) |
+| 測試 | 189 passed(全程 ruff / mypy 綠) |
+
+### 未竟事項(誠實記錄)
+
+- **`GROWTH_VELOCITY` 仍產出 0**,但性質已改變:資料源已開,缺的是**第二個時間點**(需同店相隔約 30 天,最小重抓間隔 7 天 → 約一個月後)。**這次是真的「還沒累積夠」,會自己好。**
+- judgeme / okendo / stamped 的 review handler **未實作**(樣本仍為 0,不憑想像寫);yotpo 僅 1 家樣本。
+- 觸頂訊號**尚未納入警鈴規則**(已即時推 Telegram;等有真實觸發案例再定,同門檻校準邏輯)。
+
+---
+
 ## 2026-07-17 — 警鈴(主動回報 + 原因診斷):系統從「哑巴」變「會叫痛」
 
 - **Telegram 基礎設施:MES 原本零接**（整個獨立專案無任何 telegram/bot/notify 痕跡,只有 schedule.py 一句「no auto-alert」註解）。本次從零接:`src/mes/notify.py`(Telegram Bot API sendMessage)+ config 加 `MES_TELEGRAM_BOT_TOKEN`/`MES_TELEGRAM_CHAT_ID`(選填,缺則 no-op、只記 DB)。**⚠️ 實際送達待 Jeff 提供 bot token + chat_id。**

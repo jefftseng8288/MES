@@ -70,6 +70,13 @@
 
 **進入條件:** Phase 0 五份定稿(✅ 已達成)。
 
+> **★ 實況更新(2026-07-31):Phase 1 的兩條鏈路都在這天被實質修正,下方 2026-07-15 的敘述為當時狀態,現況以本則為準。**
+> - **Seed 來源已從 5 個 review app 擴為 10 個**(加 klaviyo / smile / loyaltylion / seal_subscriptions / weglot 等「有規模才會裝」的類型);常數 `REVIEW_APP_HANDLES` → `SEED_SOURCE_HANDLES`。實測確認 App Store selector **跨 app 類型通用**。
+> - **每家店的 feature 從 9 個增為 12 個**(Taxonomy v2 加 `review_count` / `avg_rating` / `rating_distribution`)。
+> - **store-harvest 曾連續 16 天原地打轉**(head-of-line blocking:`ORDER BY created_at` + failed 永遠是候選),已改為「最久沒嘗試優先」+ `done` 納入候選(**這才讓時間序列成立**)+ 最小重抓間隔 7 天,批量 3 → 15。
+> - **`MAX_PAGES` 12 → 2000 + 單批 5 小時煞車 + 觸頂主動回報** —— 先前兩次「來源枯竭」的判斷都是誤讀(實測各來源第 25 頁仍滿),根因是觸頂沒有訊號。
+> - **防重入**:三個 baseline slot 共用 `asyncio.Lock`(`max_instances` 是 per-job,擋不住跨 slot)。
+>
 > **進度小結(更新於 2026-07-15):** A–E 全完成。基礎設施(uv / PostgreSQL 16 / async)+ 三張核心表(entity / observation_log / knowledge_state,Append-Only trigger + Provenance 雙層 + discriminated union value CHECK)+ 雙骨牌鏈路(Seed → inferred_domain)+ 五 app 擴池 + 批號 + 三批 baseline 排程與誠實健康報告 + Phase 1-D 戳店面抓 9 個市場 feature(獨立排程)皆已就緒並實測(`pytest` 70 passed、真連 DB + 真實實跑印證)。
 
 ### A. 專案基礎設施 — ✅ 完成
@@ -96,7 +103,7 @@
 
 ### C. 抓取與推論鏈路(依 Roadmap v8 五步)— 🔄 骨架完成,寫入鏈路已實測
 
-- [x] 1. Shopify App Store 評論區 Scraper(`src/mes/scrape.py`):遵守 robots.txt(`/reviews` 允許)、5–25 秒隨機 `time.sleep`;抓**五個 review app**(loox / judgeme / yotpo / okendo / stamped)評論頁 Store Name,handle 於 2026-07-15 實測(見 `REVIEW_APP_HANDLES`)。selector 於 2026-07-11 對真實 HTML 實測(`data-merchant-review` 區塊 → `title` 屬性),各 app 通用,每頁 ~10 則
+- [x] 1. Shopify App Store 評論區 Scraper(`src/mes/scrape.py`):遵守 robots.txt(`/reviews` 允許)、5–25 秒隨機 `time.sleep`;抓**五個 review app**(loox / judgeme / yotpo / okendo / stamped)評論頁 Store Name,handle 於 2026-07-15 實測(常數 2026-07-31 改名為 `SEED_SOURCE_HANDLES`,見下方更新)。selector 於 2026-07-11 對真實 HTML 實測(`data-merchant-review` 區塊 → `title` 屬性),各 app 通用,每頁 ~10 則
 - [x] 2. Inference 引擎 Name→Domain(`src/mes/inference.py`):Store Name + "shopify store" → DuckDuckGo(`html.duckduckgo.com/html/`,可替換零件)→ regex 蒸餾 → 黑名單過濾取第一筆可信 domain。實測 5/5 命中(見 progress)
 - [x] 3. Normalize(`src/mes/normalize.py`):domain 小寫/去 scheme/去 www/去 path/去 port → canonical_key → 寫 store entity;seed name 正規化 → `seed:` 前綴。收斂單一模組
 - [x] 4. Event Sourcing 寫入(`src/mes/ingest.py`):雙骨牌先 append Observation_Log(entity_id 不可空)。Knowledge_State 投影屬 Phase 2,本階段不做
@@ -265,7 +272,7 @@
 ## Phase 2.5 — Insight Engine(資訊降維 / 語義壓縮)
 
 **狀態:** ✅ 能力達成(第一批 insight_store + registry、第二批 InsightEngine / 兩個 Producer / 執行報告表 / 23:40 排程皆完成,2026-07-19)
-> **⚠️ 但有一個資料源缺口:`GROWTH_VELOCITY` 目前無資料源、對真實資料永遠產出 0 筆** —— `review_count` 未納入採集(見驗收處說明)。**能力達成 ≠ 現在有東西可產出**,兩者要分開看。
+> **⚠️ `GROWTH_VELOCITY` 現況(2026-07-31 更新):資料源已開,但還缺第二個時間點。** `review_count` 已納入採集(Taxonomy v2 + loox handler,真實觀測 6 家),故**不再是「源頭沒開」**;但成長率需要**同一家店相隔約 30 天的兩個觀測點**,而 harvest 最小重抓間隔是 7 天 → **最快約一個月後**才會有第一筆真實成長率。**這次是真的「還沒累積夠」,與先前的「源頭沒開」性質不同** —— 前者會自己好,後者不會(判準見 findings)。
 
 **目的:** 把 Knowledge 濃縮成「描述看到了什麼」的 Insight。這是 **Describe**,不是 Predict。
 
@@ -317,10 +324,10 @@
 ### ✅ 驗收(Acceptance)
 
 **狀態:** ✅ 能力達成(2026-07-19,第二批完成;143 測試全過。真實資料實跑:758 家 store → 548 筆 SKU_SCALE)
-> **⚠️ 但 `GROWTH_VELOCITY` 目前無資料源:`review_count` 未納入採集,對真實資料永遠產出 0 筆。** 待 `review_count` 納入採集後才會有真實產出(見下方說明)。**這個 ✅ 只代表「給它資料算得對」,不代表「現在有資料可算」。**
+> **⚠️ `GROWTH_VELOCITY` 現況(2026-07-31 更新):資料源已開,等第二個時間點。** `review_count` 已納入採集,真實產出仍為 0 —— 但原因已從「源頭沒開(永遠不會有)」變成「**還沒累積夠(會自己好)**」:需同店相隔約 30 天兩點,最小重抓間隔 7 天 → 約一個月後可得。
 
 **驗收條件(能力導向)—— 逐條對照實際測試:**
-- [x] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者(producer)與來源(source_knowledge_refs)—— **Rule:** 真實資料 548 筆 SKU_SCALE(547 Low / 1 Medium),每筆帶 `rule_v1` + refs;**Statistics:** 計算能力以測試資料驗證通過,但**真實產出 0 筆(無資料源,見下)**
+- [x] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者(producer)與來源(source_knowledge_refs)—— **Rule:** 真實資料 548 筆 SKU_SCALE(547 Low / 1 Medium),每筆帶 `rule_v1` + refs;**Statistics:** 計算能力以測試資料驗證通過;真實產出仍為 0,但**資料源已於 2026-07-31 開通**(review_count 已採集),等第二個時間點累積(見下)
 - [x] Insight 中沒有混入任何預測 —— `test_no_prediction_columns_in_insight_store`;Producer 只做當前事實/歷史的描述壓縮
 - [x] value_text 受控一致 —— 列舉型擋 `high_sku`/`HIGH SKU`;數值型擋非數值(`test_numeric_type_accepts_numbers_rejects_labels`)
 - [x] source_knowledge_refs 記錄基於哪幾條 (entity_id, feature) 事實 —— 真實資料與測試皆驗證
