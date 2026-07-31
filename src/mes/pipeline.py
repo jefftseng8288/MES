@@ -37,6 +37,7 @@ from mes.ingest import (
 )
 from mes.jobs import JOB_BASELINE, heartbeat
 from mes.normalize import seed_key
+from mes.notify import send_telegram
 from mes.scrape import SEED_SOURCE_HANDLES, fetch_review_page, parse_store_names
 
 # Taipei tz for batch_id dating — all three of a Taiwan-day's batches (02:00/10:00/
@@ -61,7 +62,27 @@ MAX_SEED_DELAY = 150.0
 # Between review-page fetches while gathering new names (scraper politeness).
 MIN_PAGE_DELAY = 5.0
 MAX_PAGE_DELAY = 25.0
-MAX_PAGES = 12  # safety cap while gathering new Loox names
+# ★ 兩層上限(Jeff 定案 2026-07-31)。背景:原本 MAX_PAGES=12,但實測各來源在第 25 頁
+# 都還是滿的(loox 第 40 頁仍有)——「池子乾了」是誤讀,真相是我們自己設了 12 頁的視野
+# 邊界,然後把「視野內看完了」當成「市場沒有了」。此誤讀已發生兩次。
+#
+# MAX_PAGES 刻意設在**實務上正常永遠到不了**的地方 -> 觸頂即為高信度異常訊號(疑似分頁
+# bug),不必再判斷是不是正常。設 50/100 反而會常態觸及,訊號充滿雜訊、久了被忽略。
+MAX_PAGES = 2000
+# 單批蒐集的最長執行時間 —— **實際會生效的煞車**(見 _gather_new_store_names docstring)。
+MAX_GATHER_HOURS = 5.0
+
+STOP_TARGET_MET = "target_met"
+STOP_MAX_PAGES = "max_pages"
+STOP_TIME_LIMIT = "time_limit"
+STOP_SOURCES_EXHAUSTED = "sources_exhausted"
+
+_STOP_LABELS = {
+    STOP_TARGET_MET: "湊滿目標",
+    STOP_MAX_PAGES: f"翻到 {MAX_PAGES} 頁上限",
+    STOP_TIME_LIMIT: f"跑滿 {MAX_GATHER_HOURS} 小時上限",
+    STOP_SOURCES_EXHAUSTED: "所有來源在該深度都沒有內容(真的翻到底)",
+}
 
 LOG_PATH = Path("logs/harvest_health.log")
 
@@ -76,9 +97,16 @@ class HealthReport:
     observed: int  # inference succeeded -> a domain
     not_found: int  # inference ran, no trustworthy domain (MARKET fact, not our problem)
     fetch_failed: int  # rate-limited / system couldn't run (THE dial that says "adjust?")
+    # ★ 蒐集階段為什麼停 —— 供給不足時據此分辨「我們的視野限制」vs「市場真的沒了」。
+    stop_reason: str = STOP_TARGET_MET
+    last_page: int = 0
+    gather_seconds: float = 0.0
 
     @classmethod
-    def from_statuses(cls, batch_id: str, requested: int, statuses: list[str]) -> HealthReport:
+    def from_statuses(
+        cls, batch_id: str, requested: int, statuses: list[str],
+        gather: GatherOutcome | None = None,
+    ) -> HealthReport:
         return cls(
             batch_id=batch_id,
             requested=requested,
@@ -86,7 +114,14 @@ class HealthReport:
             observed=statuses.count("observed"),
             not_found=statuses.count("not_found"),
             fetch_failed=statuses.count("fetch_failed"),
+            stop_reason=gather.stop_reason if gather else STOP_TARGET_MET,
+            last_page=gather.last_page if gather else 0,
+            gather_seconds=gather.elapsed_seconds if gather else 0.0,
         )
+
+    @property
+    def hit_cap(self) -> bool:
+        return self.stop_reason in (STOP_MAX_PAGES, STOP_TIME_LIMIT)
 
     def _pct(self, n: int) -> str:
         return f"{n / self.actual * 100:.0f}%" if self.actual else "—"
@@ -111,11 +146,20 @@ class HealthReport:
             "      一天三批(-01/-02/-03):比較同日『越晚的批 fetch_failed 是否越高』,",
             "      = 判斷『一天總量是否觸發累積限流』的關鍵訊號。",
         ]
+        # ★ 蒐集階段為何停 —— 一眼分辨「視野限制」vs「市場真的沒了」。
+        lines.append(
+            f"蒐集停止原因: {_STOP_LABELS.get(self.stop_reason, self.stop_reason)}"
+            f"(翻到第 {self.last_page} 頁,耗時 {self.gather_seconds / 60:.1f} 分)"
+        )
+        if self.hit_cap:
+            lines.append(
+                "  ⚠️ 本批**觸及我們自己設的上限**,不是市場沒有了 —— "
+                "供給不足的數字要這樣讀。"
+            )
         if self.actual < self.requested:
             lines.append(
-                f"      供給不足:五個 review app 只湊到 {self.actual} 個未撈過的新 Store Name"
+                f"      供給不足:所有 Seed 來源只湊到 {self.actual} 個未撈過的新 Store Name"
                 f"(要 {self.requested});未重複撈同店湊數。"
-                "\n      這是真實資訊(各來源在 MAX_PAGES 深度內已撈過 / 新店供給有限)。"
             )
         lines.append("=" * 44)
         return "\n".join(lines)
@@ -145,24 +189,60 @@ async def _resolve_batch_id(session: AsyncSession, day_str: str, slot: int | Non
     return f"{day_str}-{max([*seqs, FIRST_MANUAL_SEQ - 1]) + 1:02d}"
 
 
+@dataclass(frozen=True)
+class GatherOutcome:
+    """蒐集新 Seed 的結果 + **為什麼停下來** —— 觸頂不可靜默。
+
+    ★ 這是這次修正的核心:過去湊不滿只回報「撈到 2 家」,沒說「我是**翻到上限才停**的」,
+    於是「我們的視野限制」與「市場真的沒了」在回報上長得一模一樣 —— 已因此誤判兩次
+    (兩次都以為池子乾了,真相都是 MAX_PAGES 擋住)。不管上限設多少,只要觸頂是靜默的,
+    同樣的誤判就會再發生。(同一個病:邊界訊號不可偽裝成沒事。)
+    """
+
+    names: list[tuple[str, str]]
+    stop_reason: str  # target_met / max_pages / time_limit / sources_exhausted
+    last_page: int
+    elapsed_seconds: float
+
+    @property
+    def hit_cap(self) -> bool:
+        """是否撞到我們自己設的上限(而非市場真的沒東西)。"""
+        return self.stop_reason in (STOP_MAX_PAGES, STOP_TIME_LIMIT)
+
+
 async def _gather_new_store_names(
     session: AsyncSession, count: int, *, page_sleep: bool
-) -> list[tuple[str, str]]:
+) -> GatherOutcome:
     """Collect up to ``count`` (store_name, app_key) whose Seed does not yet exist.
 
     Harvests across all Seed sources (SEED_SOURCE_HANDLES), round-robin by page so
-    load spreads and fresh supply is found fast (loox alone drained by day 2). Dedupes
-    within the batch and against existing store_name_seed entities (Seed dedupe stays
-    in force — we do NOT re-harvest the same store to hit the number). A shortfall
-    (actual < count) is honest signal, reported via HealthReport.
+    load spreads and fresh supply is found fast. Dedupes within the batch and against
+    existing store_name_seed entities (Seed dedupe stays in force — we do NOT re-harvest
+    the same store to hit the number). A shortfall (actual < count) is honest signal.
+
+    **兩層上限(Jeff 定案):**
+      - `MAX_PAGES=2000` —— 刻意設在實務上正常永遠到不了的地方,所以「觸頂」是**高信度的
+        異常訊號**(疑似分頁 bug),不需要判斷。保留它純粹是防失控(萬一分頁永遠回 200)。
+      - `MAX_GATHER_HOURS=5` —— **這才是實際會生效的煞車。** 10 來源 × 2000 頁 × 5–25 秒
+        ≈ 83 小時,沒有時間煞車一批會跑三天多、卡住後續。且「湊不滿」的正常結局就是一直
+        翻下去,所以這不是假想情況。超時**正常收尾**(已撈到的照常回傳,不丟棄)。
     """
     collected: list[tuple[str, str]] = []
     seen_keys: set[str] = set()
+    started = time.monotonic()
+    deadline = started + MAX_GATHER_HOURS * 3600
+    page = 0
+
+    def outcome(reason: str) -> GatherOutcome:
+        return GatherOutcome(collected, reason, page, time.monotonic() - started)
+
     for page in range(1, MAX_PAGES + 1):
         progressed = False  # did any app yield names at this page depth?
         for app_key, handle in SEED_SOURCE_HANDLES.items():
             if len(collected) >= count:
-                return collected
+                return outcome(STOP_TARGET_MET)
+            if time.monotonic() > deadline:
+                return outcome(STOP_TIME_LIMIT)
             try:
                 html = fetch_review_page(handle, page)
             except httpx.HTTPError:
@@ -183,12 +263,44 @@ async def _gather_new_store_names(
                 if exists is None:
                     collected.append((name, app_key))
                     if len(collected) >= count:
-                        return collected
+                        return outcome(STOP_TARGET_MET)
             if page_sleep:
                 time.sleep(random.uniform(MIN_PAGE_DELAY, MAX_PAGE_DELAY))
         if not progressed:
-            break  # every app is out of pages at this depth
-    return collected
+            # 所有來源在這個深度都沒內容 = 真的翻到底(這才是「市場沒了」的正當訊號)。
+            return outcome(STOP_SOURCES_EXHAUSTED)
+    return outcome(STOP_MAX_PAGES)  # 跑完 2000 頁仍沒湊滿 -> 疑似分頁 bug
+
+
+def build_cap_hit_message(report: HealthReport) -> str:
+    """觸頂訊息 —— **必須說清楚是哪一種**,兩者是不同狀況、修法不同。
+
+    沿用警鈴「帶原因診斷」的精神:不只說「觸頂了」,要說翻到第幾頁、撈到幾家、耗時多久。
+    """
+    if report.stop_reason == STOP_MAX_PAGES:
+        headline = f"翻到 {MAX_PAGES} 頁上限仍未湊滿"
+        diagnosis = (
+            "疑似分頁有 bug(永遠回 200 但內容重複),或該來源真的深不見底。"
+            "正常情況不該到得了這個上限 —— 這是高信度的異常訊號。"
+        )
+    else:
+        headline = f"跑滿 {MAX_GATHER_HOURS} 小時上限"
+        diagnosis = (
+            "執行時間耗盡:可能是深度不足以湊滿目標(一直往下翻),或翻頁間隔過長。"
+            "已撈到的照常寫入,未丟棄。"
+        )
+    return "\n".join([
+        f"⏱️ [MES 蒐集觸頂] {report.batch_id}",
+        "",
+        f"偵測:{headline}",
+        f"  翻到第 {report.last_page} 頁 · 撈到 {report.actual}/{report.requested} 家"
+        f" · 耗時 {report.gather_seconds / 3600:.2f} 小時",
+        f"  來源數:{len(SEED_SOURCE_HANDLES)}",
+        "",
+        f"最可能原因:{diagnosis}",
+        "",
+        "(參考,非自動調整;是否調整由你判斷)",
+    ])
 
 
 async def run_daily_batch(
@@ -219,7 +331,10 @@ async def run_daily_batch(
         async with heartbeat(JOB_BASELINE) as beat, session_maker() as session:
             day_str = datetime.now(_TAIPEI).date().isoformat()
             batch_id = await _resolve_batch_id(session, day_str, slot)
-            names = await _gather_new_store_names(session, batch_size, page_sleep=page_sleep)
+            gather = await _gather_new_store_names(
+                session, batch_size, page_sleep=page_sleep
+            )
+            names = gather.names
             for i, (name, app_key) in enumerate(names):
                 seed = await ingest_seed(
                     session, name, batch_id=batch_id, source_page_label=f"{app_key} review page"
@@ -246,14 +361,19 @@ async def run_daily_batch(
                 "observed": statuses.count("observed"),
                 "not_found": statuses.count("not_found"),
                 "fetch_failed": statuses.count("fetch_failed"),
+                "stop_reason": gather.stop_reason, "last_page": gather.last_page,
+                "hit_cap": gather.hit_cap,
             }
     finally:
         if engine is not None:
             await engine.dispose()
 
-    report = HealthReport.from_statuses(batch_id, batch_size, statuses)
+    report = HealthReport.from_statuses(batch_id, batch_size, statuses, gather)
     if emit:
         _emit(report)
+        # ★ 觸頂不可靜默 —— 主動回報,並說清楚是哪一種上限。
+        if report.hit_cap:
+            send_telegram(build_cap_hit_message(report))
     return report
 
 

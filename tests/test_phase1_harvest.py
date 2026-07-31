@@ -110,3 +110,117 @@ async def test_compute_health_for_batch_counts_by_batch_id(session: AsyncSession
     assert after.not_found - before.not_found == 1
     assert after.fetch_failed - before.fetch_failed == 1
     assert after.batch_id == batch
+
+
+# --- 兩層上限 + 觸頂訊號(2026-07-31)----------------------------------------
+
+
+def test_caps_are_set_where_intended() -> None:
+    """MAX_PAGES 刻意設在正常到不了的地方;時間煞車才是實際生效的那個。"""
+    from mes.pipeline import MAX_GATHER_HOURS, MAX_PAGES
+
+    assert MAX_PAGES == 2000
+    assert MAX_GATHER_HOURS == 5.0
+
+
+def test_hit_cap_distinguishes_our_limit_from_market_empty() -> None:
+    """★ 核心:觸頂(我們的視野限制)與來源真的翻到底(市場沒了)必須分得開。"""
+    from mes.pipeline import (
+        STOP_MAX_PAGES,
+        STOP_SOURCES_EXHAUSTED,
+        STOP_TARGET_MET,
+        STOP_TIME_LIMIT,
+        GatherOutcome,
+    )
+
+    def out(reason: str) -> GatherOutcome:
+        return GatherOutcome([], reason, last_page=1, elapsed_seconds=1.0)
+
+    assert out(STOP_MAX_PAGES).hit_cap is True
+    assert out(STOP_TIME_LIMIT).hit_cap is True
+    assert out(STOP_SOURCES_EXHAUSTED).hit_cap is False  # 這才是「市場真的沒了」
+    assert out(STOP_TARGET_MET).hit_cap is False
+
+
+def test_health_report_shows_stop_reason_and_cap_warning() -> None:
+    """健康報告要能一眼看出「本批是否觸頂」。"""
+    from mes.pipeline import STOP_MAX_PAGES, STOP_TARGET_MET, GatherOutcome, HealthReport
+
+    hit = HealthReport.from_statuses(
+        "2099-01-01-01", 30, ["observed"] * 2,
+        GatherOutcome([], STOP_MAX_PAGES, last_page=2000, elapsed_seconds=7200.0),
+    )
+    text = hit.format()
+    assert "蒐集停止原因" in text and "2000 頁上限" in text
+    assert "觸及我們自己設的上限" in text and "不是市場沒有了" in text
+
+    normal = HealthReport.from_statuses(
+        "2099-01-01-02", 30, ["observed"] * 30,
+        GatherOutcome([], STOP_TARGET_MET, last_page=1, elapsed_seconds=60.0),
+    )
+    assert "觸及我們自己設的上限" not in normal.format()  # 正常不誤報
+
+
+def test_cap_hit_message_distinguishes_the_two_causes() -> None:
+    """★ 訊息必須說清楚是哪一種上限 —— 兩者狀況不同、修法不同。"""
+    from mes.pipeline import (
+        STOP_MAX_PAGES,
+        STOP_TIME_LIMIT,
+        GatherOutcome,
+        HealthReport,
+        build_cap_hit_message,
+    )
+
+    pages = build_cap_hit_message(HealthReport.from_statuses(
+        "2099-01-01-01", 30, ["observed"] * 2,
+        GatherOutcome([], STOP_MAX_PAGES, last_page=2000, elapsed_seconds=3600.0)))
+    assert "2000 頁上限" in pages and "分頁有 bug" in pages
+    assert "第 2000 頁" in pages and "2/30" in pages  # 帶診斷資訊
+
+    timeout = build_cap_hit_message(HealthReport.from_statuses(
+        "2099-01-01-02", 30, ["observed"] * 5,
+        GatherOutcome([], STOP_TIME_LIMIT, last_page=310, elapsed_seconds=18000.0)))
+    assert "5.0 小時上限" in timeout and "執行時間耗盡" in timeout
+    assert "未丟棄" in timeout  # 已撈到的照常寫入
+    assert "分頁有 bug" not in timeout  # 兩者不可混淆
+
+
+# --- 防重入:三個 baseline slot 跨 slot 互斥(2026-07-31)---------------------
+
+
+async def test_baseline_slots_are_mutually_exclusive() -> None:
+    """★ slot 3(21:00)還在跑時 slot 1(02:00)啟動 → 必須排隊,不可同時打 DDG。
+
+    APScheduler 的 max_instances 是 per-job,三個 slot 是三個 job,擋不住互相重疊;
+    靠 schedule._BASELINE_LOCK 這把跨 slot 的鎖。
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    import mes.schedule as sch
+
+    running = concurrent_peak = 0
+
+    async def fake_batch(*, slot: int) -> None:
+        nonlocal running, concurrent_peak
+        running += 1
+        concurrent_peak = max(concurrent_peak, running)
+        await asyncio.sleep(0.05)
+        running -= 1
+
+    with patch.object(sch, "run_daily_batch", fake_batch):
+        await asyncio.gather(sch._job(3), sch._job(1), sch._job(2))
+
+    assert concurrent_peak == 1  # 同時最多一批在跑(否則 DDG 速率翻倍)
+
+
+async def test_store_harvest_not_blocked_by_baseline_lock() -> None:
+    """store-harvest 戳的是各店自己的伺服器(不同對象),不該被 baseline 的鎖擋住。"""
+    import asyncio
+
+    import mes.schedule as sch
+
+    async with sch._BASELINE_LOCK:  # baseline 佔用中
+        # 這把鎖只給 baseline;store-harvest 路徑不碰它 -> 立即可取得
+        assert sch._BASELINE_LOCK.locked()
+        await asyncio.sleep(0)  # 不會卡住

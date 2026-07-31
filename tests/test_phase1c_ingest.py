@@ -63,7 +63,9 @@ async def test_domino_one_seed_and_observed_on_app_store(session: AsyncSession) 
     assert obs.feature == FEATURE_OBSERVED_ON_APP_STORE
     assert obs.value_type == "string"
     assert obs.value_raw == name  # original Store Name 原貌
-    assert obs.value_text == "Loox Review Page"
+    # 來源標記由 ingest 統一正規化(小寫),不依賴呼叫端傳什麼大小寫 ——
+    # 否則同一來源會在統計上被拆成兩個(實測曾有 "Loox Review Page" 與 "loox review page" 並存)。
+    assert obs.value_text == "loox review page"
     assert obs.status == "observed"
     assert obs.confidence == "certain"
     assert obs.source == "html_page"
@@ -153,3 +155,11 @@ async def test_seed_dedupe_same_name_one_entity(session: AsyncSession) -> None:
         )
     )
     assert obs_count == 2
+
+
+def test_normalize_source_label_collapses_case_and_space() -> None:
+    """★ 來源標記正規化:大小寫/多餘空白一律收斂,避免同來源被拆成兩個。"""
+    from mes.ingest import normalize_source_label
+
+    for raw in ("Loox Review Page", "loox review page", "  LOOX   Review  Page  "):
+        assert normalize_source_label(raw) == "loox review page"

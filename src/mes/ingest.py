@@ -64,18 +64,28 @@ async def _get_or_create_entity(
     return entity, True
 
 
+def normalize_source_label(label: str) -> str:
+    """來源標記的**單一正規化入口**:小寫 + 收斂空白。寫入前一律過這裡。"""
+    return " ".join(label.split()).lower()
+
+
 async def ingest_seed(
     session: AsyncSession,
     raw_store_name: str,
     *,
     batch_id: str,
-    source_page_label: str = "Loox Review Page",
+    source_page_label: str = "unknown review page",
 ) -> Entity:
     """骨牌一: upsert the Seed entity and append an observed_on_app_store observation.
 
     The Seed entity dedupes on canonical_key ('seed:' + normalized name); the
     observation is Append-Only (re-seeing a name appends a new row). ``batch_id``
     records which run produced it (Provenance 延伸).
+
+    ``source_page_label`` 記「這個 Seed 從哪個來源撈到」—— 未來分析「哪個來源的店家品質好」
+    的依據。**格式由本函式統一正規化(小寫 + 去多餘空白),不依賴呼叫端自律** ——
+    曾因舊的預設值 "Loox Review Page" 與呼叫端傳的 "loox review page" 並存,
+    讓同一個來源在統計上被拆成兩個(同 producer 大小寫問題)。
     """
     seed, _ = await _get_or_create_entity(
         session, "store_name_seed", seed_key(raw_store_name)
@@ -86,7 +96,7 @@ async def ingest_seed(
             feature=FEATURE_OBSERVED_ON_APP_STORE,
             value_type="string",
             value_raw=raw_store_name,
-            value_text=source_page_label,
+            value_text=normalize_source_label(source_page_label),
             source="html_page",
             producer=PRODUCER_CRAWLER,
             observed_at=_now(),

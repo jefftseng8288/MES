@@ -16,6 +16,7 @@ fetch_failed data points first, then Jeff decides by eye. (先有 Observation �
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -23,6 +24,8 @@ from apscheduler.triggers.cron import CronTrigger
 
 from mes.harvest import run_store_harvest_batch
 from mes.pipeline import run_daily_batch
+
+logger = logging.getLogger(__name__)
 
 # Three fire times a day, in Taiwan time. The CronTrigger's timezone is set EXPLICITLY
 # to Asia/Taipei — a pre-built CronTrigger does NOT inherit the scheduler's timezone
@@ -44,8 +47,29 @@ SCHEDULED_SLOTS = {2: 1, 10: 2, 21: 3}  # baseline (DDG): 02:00 -> 01, 10:00 -> 
 STORE_HARVEST_HOURS = "*/3"
 
 
+# ★ 跨 slot 互斥鎖(2026-07-31)。
+# APScheduler 的 `max_instances` 是 **per-job**,而三個 baseline slot 是三個獨立 job
+# (harvest_slot_1/2/3)—— 它只擋「同一個 slot 疊自己」,**擋不住 slot 3(21:00)還在跑時
+# slot 1(02:00)啟動**。而 21:00→02:00 剛好 5 小時,與蒐集的時間煞車
+# (pipeline.MAX_GATHER_HOURS)等長 → 只要有一批跑滿煞車,就必然首尾相接。
+#
+# 資料不會壞(batch_id 不同 + Append-Only),但**兩批同時對 DuckDuckGo 發請求會讓速率
+# 翻倍**,正好打在 baseline 最敏感的地方(DDG 限流)。故三個 slot 共用這把鎖。
+#
+# 選擇「等待」而非「跳過」:等待保住該批(不損失供給),且因為時間煞車有界、slot 間隔
+# 5–11 小時,不會累積成堆。等待本身會記 WARNING;且會觸發等待的前提是前一批跑滿煞車,
+# 那條路徑已經會主動推 Telegram 觸頂訊息,所以不是靜默的。
+_BASELINE_LOCK = asyncio.Lock()
+
+
 async def _job(slot: int) -> None:
-    await run_daily_batch(slot=slot)
+    if _BASELINE_LOCK.locked():
+        logger.warning(
+            "[schedule] slot %d 觸發時上一批 baseline 仍在執行 —— 等待中(避免同時打 DDG "
+            "讓速率翻倍)。前一批很可能跑滿了蒐集時間煞車。", slot,
+        )
+    async with _BASELINE_LOCK:
+        await run_daily_batch(slot=slot)
 
 
 async def _store_harvest_job() -> None:
