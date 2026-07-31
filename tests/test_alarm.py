@@ -343,7 +343,10 @@ async def test_heartbeat_writes_row_even_with_zero_output(session: AsyncSession)
         beat.summary = {"selected": 0, "eligible": 0}
     row = await session.scalar(select(JobRunLog).where(JobRunLog.job == job))
     assert row is not None and row.status == "success"
-    assert row.summary == {"selected": 0, "eligible": 0}
+    assert row.summary is not None
+    assert row.summary["selected"] == 0 and row.summary["eligible"] == 0
+    # 心跳自動帶上「這次是哪版 code 跑的」(讓常駐 daemon 跑舊 code 變成可觀測)
+    assert "code_version" in row.summary
 
 
 async def test_heartbeat_records_failure_and_reraises(session: AsyncSession) -> None:
@@ -407,3 +410,22 @@ def test_evaluate_without_beats_keeps_old_behaviour() -> None:
     batches = [_b(1, seeds=0, observed=0, exists=False), _b(2, seeds=30, observed=30),
                _b(3, seeds=30, observed=30)]
     assert any(a.alert_type == ALERT_ZERO_OBSERVED for a in evaluate(batches))
+
+
+def test_daily_heartbeat_flags_stale_code() -> None:
+    """★ 常駐 daemon 跑舊 code → 每日安好要看得出來(2026-08-01 踩到:harvest 跑了 16 天舊 code)。"""
+    from mes.jobs import CODE_VERSION
+
+    beats = _healthy_beats()
+    beats[JOB_HARVEST] = _beat(
+        JOB_HARVEST, runs_today=8,
+        summary={"selected": 15, "eligible": 500, "code_version": "0000000"})
+    msg = build_heartbeat("2099-01-01", [], beats)
+    assert "跑的是舊 code" in msg and "0000000" in msg
+    assert "需重啟" in msg
+
+    # 版本一致時不誤報
+    beats[JOB_HARVEST] = _beat(
+        JOB_HARVEST, runs_today=8,
+        summary={"selected": 15, "eligible": 500, "code_version": CODE_VERSION})
+    assert "跑的是舊 code" not in build_heartbeat("2099-01-01", [], beats)

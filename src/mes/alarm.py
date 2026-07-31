@@ -25,6 +25,7 @@ from mes.db.models import AlertLog, JobRunLog, ObservationLog
 from mes.ingest import FEATURE_OBSERVED_ON_APP_STORE
 from mes.jobs import (
     ALL_JOBS,
+    CODE_VERSION,
     EXPECTED_RUNS_PER_DAY,
     JOB_BASELINE,
     JOB_HARVEST,
@@ -367,6 +368,13 @@ def _job_line(beat: JobBeat) -> str:
     if beat.last_status == "failed":
         mark = "❌"
     detail = f"{beat.runs_today}/{expected}"
+    # ★ 跑的是不是最新 code —— 常駐 daemon 會把程式碼凍結在啟動當下,改了 code 不重啟
+    # 就一直跑舊邏輯,而且 log 照常、批次照常,完全沒有訊號(2026-08-01 實際踩到:
+    # harvest 跑了 16 天舊 code)。心跳帶 code_version 後,這件事變成看得見的。
+    ran_version = beat.last_summary.get("code_version")
+    if ran_version and CODE_VERSION and ran_version != CODE_VERSION:
+        return (f"{beat.label}:{detail} ⚠️ 跑的是舊 code({ran_version},"
+                f"目前 {CODE_VERSION})—— 常駐 daemon 需重啟")
     # harvest 挑到 0 家要能看出是「正常閒置」而非失效。
     if beat.job == JOB_HARVEST and int(beat.last_summary.get("selected", -1)) == 0:
         if _harvest_idle_is_normal(beat.last_summary):
