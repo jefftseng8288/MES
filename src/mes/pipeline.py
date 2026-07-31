@@ -37,7 +37,7 @@ from mes.ingest import (
 )
 from mes.jobs import JOB_BASELINE, heartbeat
 from mes.normalize import seed_key
-from mes.scrape import REVIEW_APP_HANDLES, fetch_review_page, parse_store_names
+from mes.scrape import SEED_SOURCE_HANDLES, fetch_review_page, parse_store_names
 
 # Taipei tz for batch_id dating — all three of a Taiwan-day's batches (02:00/10:00/
 # 21:00 TW) share the same YYYY-MM-DD prefix, numbered -01/-02/-03 in fire order.
@@ -115,7 +115,7 @@ class HealthReport:
             lines.append(
                 f"      供給不足:五個 review app 只湊到 {self.actual} 個未撈過的新 Store Name"
                 f"(要 {self.requested});未重複撈同店湊數。"
-                "\n      這是真實資訊(各 app 評論頁翻到底 / 新店供給有限)。"
+                "\n      這是真實資訊(各來源在 MAX_PAGES 深度內已撈過 / 新店供給有限)。"
             )
         lines.append("=" * 44)
         return "\n".join(lines)
@@ -150,7 +150,7 @@ async def _gather_new_store_names(
 ) -> list[tuple[str, str]]:
     """Collect up to ``count`` (store_name, app_key) whose Seed does not yet exist.
 
-    Harvests across all five review apps (REVIEW_APP_HANDLES), round-robin by page so
+    Harvests across all Seed sources (SEED_SOURCE_HANDLES), round-robin by page so
     load spreads and fresh supply is found fast (loox alone drained by day 2). Dedupes
     within the batch and against existing store_name_seed entities (Seed dedupe stays
     in force — we do NOT re-harvest the same store to hit the number). A shortfall
@@ -160,7 +160,7 @@ async def _gather_new_store_names(
     seen_keys: set[str] = set()
     for page in range(1, MAX_PAGES + 1):
         progressed = False  # did any app yield names at this page depth?
-        for app_key, handle in REVIEW_APP_HANDLES.items():
+        for app_key, handle in SEED_SOURCE_HANDLES.items():
             if len(collected) >= count:
                 return collected
             try:

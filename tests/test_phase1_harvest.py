@@ -29,12 +29,18 @@ async def session() -> AsyncGenerator[AsyncSession, None]:
 
 
 def test_five_review_app_handles_registered() -> None:
-    from mes.scrape import REVIEW_APP_HANDLES
+    from mes.scrape import SEED_SOURCE_HANDLES
 
-    assert set(REVIEW_APP_HANDLES) == {"loox", "judgeme", "yotpo", "okendo", "stamped"}
+    # review 類五個 + 2026-07-31 擴充的五個非 review 類(全部 handle 皆實測過)
+    assert {"loox", "judgeme", "yotpo", "okendo", "stamped"} <= set(SEED_SOURCE_HANDLES)
+    assert {"klaviyo", "smile", "loyaltylion", "seal_subscriptions", "weglot"} <= set(
+        SEED_SOURCE_HANDLES
+    )
     # handles are the App Store URL slugs (not all equal to the app name)
-    assert REVIEW_APP_HANDLES["stamped"] == "product-reviews-addon"
-    assert REVIEW_APP_HANDLES["yotpo"] == "yotpo-social-reviews"
+    assert SEED_SOURCE_HANDLES["stamped"] == "product-reviews-addon"
+    assert SEED_SOURCE_HANDLES["yotpo"] == "yotpo-social-reviews"
+    # handle 不等於 app 名的再一例(這次擴充實測)
+    assert SEED_SOURCE_HANDLES["klaviyo"] == "klaviyo-email-marketing"
 
 
 def test_three_proportions_computed_separately() -> None:

@@ -36,12 +36,30 @@ _BASE = "https://apps.shopify.com"
 
 # Review-app name -> Shopify App Store URL handle (handles verified 2026-07-15; they
 # are NOT all the same as the app's canonical name — e.g. stamped's slug is historical).
-REVIEW_APP_HANDLES = {
+# Seed 來源 = Shopify App Store 上各 app 的評論頁。**不限 review app** —— 最終目標是
+# 全體 Shopify 店家,review app 只是最初的取樣管道。
+#
+# ★ handle 一律實測後才寫進來(不憑 app 名猜)。實測教訓:review 類五個裡有三個 handle
+# 不等於 app 名(yotpo-social-reviews / okendo-reviews / stamped=product-reviews-addon);
+# 這次擴充也再次踩到(gorgias / recharge 兩種猜法皆 404,已剔除)。
+#
+# 2026-07-31 擴充的五個為「**有規模才會裝**」的工具類型(用戶天然偏成熟店家):
+# 進階 email 行銷 / 忠誠度 / 訂閱制 / 跨境多語言。selector 已實測跨 app 類型通用。
+# 註:這是「哪種店比較可能活躍」的**啟發**,不是事實 —— 活躍與否由 harvest 的
+# is_active / product_count / review_count 直接測得,不預先排除任何來源。
+SEED_SOURCE_HANDLES = {
+    # review 類(2026-07-15 實測)
     "loox": "loox",
     "judgeme": "judgeme",
     "yotpo": "yotpo-social-reviews",
     "okendo": "okendo-reviews",
     "stamped": "product-reviews-addon",
+    # 非 review 類(2026-07-31 實測,每個都確認 200 + selector 抓得到店名)
+    "klaviyo": "klaviyo-email-marketing",  # email 行銷
+    "smile": "smile-io",  # 忠誠度 / 獎勵
+    "loyaltylion": "loyaltylion",  # 忠誠度
+    "seal_subscriptions": "seal-subscriptions",  # 訂閱制
+    "weglot": "weglot",  # 跨境多語言
 }
 
 # Verified selector (2026-07-11). Kept as one place so a structure change is a
