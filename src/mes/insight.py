@@ -44,6 +44,7 @@ from mes.insight_producers import (
     Skip,
 )
 from mes.insight_registry import validate_insight_value, validate_producer
+from mes.jobs import JOB_INSIGHT, heartbeat
 from mes.knowledge import feature_history_bulk
 
 logger = logging.getLogger(__name__)
@@ -215,8 +216,12 @@ async def run_insight(
         engine = create_async_engine(get_settings().database_url)
         session_maker = async_sessionmaker(bind=engine, expire_on_commit=False)
     try:
-        async with session_maker() as session:
+        async with heartbeat(JOB_INSIGHT) as beat, session_maker() as session:
             report = await run_insight_batch(session)
+            beat.summary = {
+                "entities": report.entities, "produced": report.produced,
+                "skipped": report.skipped, "produced_by_type": dict(report.produced_by_type),
+            }
             print(report.summary())
             return report
     finally:

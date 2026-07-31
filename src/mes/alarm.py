@@ -21,8 +21,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from mes.config import get_settings
-from mes.db.models import AlertLog, ObservationLog
+from mes.db.models import AlertLog, JobRunLog, ObservationLog
 from mes.ingest import FEATURE_OBSERVED_ON_APP_STORE
+from mes.jobs import (
+    ALL_JOBS,
+    EXPECTED_RUNS_PER_DAY,
+    JOB_BASELINE,
+    JOB_HARVEST,
+    JOB_INSIGHT,
+    JOB_PROJECTION,
+)
 from mes.notify import send_telegram
 
 logger = logging.getLogger(__name__)
@@ -38,6 +46,22 @@ SLOT_LABELS = {1: "02:00", 2: "10:00", 3: "21:00"}
 ALERT_ZERO_OBSERVED = "zero_observed"
 ALERT_FETCH_FAILED_HIGH = "fetch_failed_high"
 ALERT_SUPPLY_LOW = "supply_low"
+# 鏈路心跳類(第 5 步新增)。
+ALERT_JOB_MISSING = "job_missing"  # 該跑而沒跑
+ALERT_JOB_FAILED = "job_failed"  # 跑了但報錯
+ALERT_JOB_NO_OUTPUT = "job_no_output"  # 跑了但產出異常為 0(已排除正常閒置)
+
+# 各 job「多久沒心跳就算失聯」的寬限窗(小時)。**暫定值,待實況調整。**
+# ⚠️ 刻意寬鬆:警鈴 23:50 跑,距 insight(23:40)僅 10 分鐘,若 insight 跑久一點會被
+# 誤判「沒跑」。故日更型 job 用 25 小時窗(「最近 25 小時內有沒有跑過」)而非「今天有沒有跑」。
+# harvest 每 3 小時一批,給 9 小時(約 3 個週期)仍能當天抓到死掉。
+GRACE_HOURS = {
+    JOB_BASELINE: 25.0, JOB_HARVEST: 9.0, JOB_PROJECTION: 25.0, JOB_INSIGHT: 25.0,
+}
+_JOB_LABELS = {
+    JOB_BASELINE: "baseline", JOB_HARVEST: "harvest",
+    JOB_PROJECTION: "投影", JOB_INSIGHT: "Insight",
+}
 
 
 @dataclass(frozen=True)
@@ -158,6 +182,116 @@ def evaluate(batches: list[BatchStats]) -> list[Alert]:
     return alerts
 
 
+@dataclass(frozen=True)
+class JobBeat:
+    """某 job 的心跳現況(最近一次 + 當天次數),供警鈴與每日安好共用。"""
+
+    job: str
+    last_run: datetime | None  # 最近一次執行結束時間(None = 從無心跳)
+    last_status: str | None  # success / failed
+    last_summary: dict[str, Any]
+    runs_today: int  # 當天(台灣日)跑了幾次
+
+    @property
+    def label(self) -> str:
+        return _JOB_LABELS.get(self.job, self.job)
+
+
+async def load_job_beats(
+    session: AsyncSession, taiwan_date: str, *, now: datetime | None = None
+) -> dict[str, JobBeat]:
+    """讀四條鏈路的心跳現況。從無心跳 → last_run=None(這正是「根本沒跑」的訊號)。"""
+    now = now or datetime.now(UTC)
+    beats: dict[str, JobBeat] = {}
+    for job in ALL_JOBS:
+        row = (
+            await session.execute(
+                select(JobRunLog).where(JobRunLog.job == job)
+                .order_by(JobRunLog.finished_at.desc()).limit(1)
+            )
+        ).scalars().first()
+        runs_today = int(await session.scalar(
+            select(func.count()).select_from(JobRunLog).where(
+                JobRunLog.job == job,
+                func.to_char(func.timezone("Asia/Taipei", JobRunLog.finished_at), "YYYY-MM-DD")
+                == taiwan_date,
+            )
+        ) or 0)
+        beats[job] = JobBeat(
+            job=job,
+            last_run=row.finished_at if row else None,
+            last_status=row.status if row else None,
+            last_summary=(row.summary or {}) if row else {},
+            runs_today=runs_today,
+        )
+    return beats
+
+
+def _harvest_idle_is_normal(summary: dict[str, Any]) -> bool:
+    """★ harvest「挑到 0 家」是**正常閒置**還是**異常**。
+
+    正常閒置:候選池全被最小重抓間隔 gate 住(eligible == 0)—— 這是自適應的正常結果。
+    異常:eligible > 0(有店可抓)卻挑到 0 家 → 挑選邏輯壞了,該叫。
+    """
+    return int(summary.get("eligible", 0)) == 0
+
+
+def evaluate_jobs(beats: dict[str, JobBeat], *, now: datetime | None = None) -> list[Alert]:
+    """四條鏈路的心跳巡檢:沒跑 / 報錯 / 跑了但產出異常為 0。"""
+    now = now or datetime.now(UTC)
+    alerts: list[Alert] = []
+    for job, beat in beats.items():
+        grace = GRACE_HOURS.get(job, 25.0)
+        detail = {"job": job, "runs_today": beat.runs_today,
+                  "last_run": beat.last_run.isoformat() if beat.last_run else None,
+                  "grace_hours": grace, "summary": beat.last_summary}
+
+        # 1. 該跑而沒跑(含「從來沒跑過」——這次 projection/insight 就是這種)
+        if beat.last_run is None:
+            alerts.append(Alert(
+                ALERT_JOB_MISSING, detection=f"{beat.label} 從無任何心跳記錄",
+                diagnosis=f"{beat.label} 可能從未被排程觸發(daemon 沒 load / plist 沒掛)",
+                detail=detail))
+            continue
+        idle_h = (now - beat.last_run).total_seconds() / 3600
+        if idle_h > grace:
+            alerts.append(Alert(
+                ALERT_JOB_MISSING,
+                detection=f"{beat.label} 已 {idle_h:.1f} 小時沒有心跳(寬限 {grace:g} 小時)",
+                diagnosis=f"{beat.label} 疑似停擺(daemon 掛掉 / 排程沒觸發 / 程序啟動即失敗)",
+                detail=detail))
+            continue
+
+        # 2. 跑了但報錯
+        if beat.last_status == "failed":
+            alerts.append(Alert(
+                ALERT_JOB_FAILED, detection=f"{beat.label} 最近一次執行失敗",
+                diagnosis=f"{beat.label} 有跑但拋出例外,詳見 job_run_log.error",
+                detail=detail))
+            continue
+
+        # 3. 跑了但產出異常為 0(★ 必須排除正常閒置)
+        s = beat.last_summary
+        if job == JOB_HARVEST and int(s.get("selected", 0)) == 0:
+            if not _harvest_idle_is_normal(s):
+                alerts.append(Alert(
+                    ALERT_JOB_NO_OUTPUT,
+                    detection=f"harvest 候選池有 {s.get('eligible', 0)} 家可抓,卻挑到 0 家",
+                    diagnosis="挑選邏輯異常(可抓的店存在但沒被挑中),非最小間隔造成的正常閒置",
+                    detail=detail))
+        elif job == JOB_PROJECTION and int(s.get("rows_written", -1)) == 0:
+            alerts.append(Alert(
+                ALERT_JOB_NO_OUTPUT, detection="投影跑完但寫出 0 列 knowledge_state",
+                diagnosis="observation_log 可能無資料,或投影取值全被排除 —— 需人工查看",
+                detail=detail))
+        elif job == JOB_INSIGHT and int(s.get("entities", -1)) == 0:
+            alerts.append(Alert(
+                ALERT_JOB_NO_OUTPUT, detection="Insight 跑完但沒有任何 entity 可描述",
+                diagnosis="knowledge_state 沒有 store 的市場特徵(harvest 可能沒產出)",
+                detail=detail))
+    return alerts
+
+
 def build_message(taiwan_date: str, alerts: list[Alert]) -> str:
     lines = [f"⚠️ [MES 警鈴] {taiwan_date}", ""]
     for i, a in enumerate(alerts, 1):
@@ -168,16 +302,46 @@ def build_message(taiwan_date: str, alerts: list[Alert]) -> str:
     return "\n".join(lines)
 
 
-def build_heartbeat(taiwan_date: str, batches: list[BatchStats]) -> str:
-    """無警鈴時的每日安好摘要 —— 心跳,證明 daemon 有跑、三批數字健康。"""
+def _job_line(beat: JobBeat) -> str:
+    """一條鏈路在每日安好裡的一行狀態。"""
+    expected = EXPECTED_RUNS_PER_DAY.get(beat.job, 1)
+    if beat.last_run is None:
+        return f"{beat.label}:❌ 從無心跳"
+    mark = "✓" if beat.runs_today >= expected else "⚠️"
+    if beat.last_status == "failed":
+        mark = "❌"
+    detail = f"{beat.runs_today}/{expected}"
+    # harvest 挑到 0 家要能看出是「正常閒置」而非失效。
+    if beat.job == JOB_HARVEST and int(beat.last_summary.get("selected", -1)) == 0:
+        if _harvest_idle_is_normal(beat.last_summary):
+            gated = beat.last_summary.get("gated_by_interval", 0)
+            return f"{beat.label}:{detail} 😴 閒置(候選池 {gated} 家都在最小重抓間隔內,正常)"
+        return f"{beat.label}:{detail} ⚠️ 挑到 0 家(候選池仍有可抓的)"
+    return f"{beat.label}:{detail} {mark}"
+
+
+def build_heartbeat(
+    taiwan_date: str, batches: list[BatchStats], beats: dict[str, JobBeat] | None = None
+) -> str:
+    """無警鈴時的每日安好摘要 —— 心跳,證明四條鏈路都活著。
+
+    **為什麼要含四條鏈路:** 警鈴只在異常時推,正常時 Jeff 看不到其他鏈路狀態 ——
+    這次 projection / insight 靜默失效半個月,正是這個盲區造成的。
+    """
     lines = [f"✅ [MES 每日安好] {taiwan_date}", ""]
     for b in batches:
         if b.exists:
             lines.append(f"{SLOT_LABELS[b.slot]}:seeds {b.seeds} / observed {b.observed}")
         else:
             lines.append(f"{SLOT_LABELS[b.slot]}:(無記錄)")
+    if beats:
+        lines.append("")
+        lines.append("四條鏈路(當天執行次數/預期):")
+        for job in ALL_JOBS:
+            if job in beats:
+                lines.append(f"  {_job_line(beats[job])}")
     lines.append("")
-    lines.append("三批皆正常,無警鈴。")
+    lines.append("無警鈴。")
     return "\n".join(lines)
 
 
@@ -208,11 +372,13 @@ async def run_alarm_check(
     try:
         async with session_maker() as session:
             batches = await load_today_batches(session, taiwan_date)
-            alerts = evaluate(batches)
+            beats = await load_job_beats(session, taiwan_date)
+            # baseline 三警鈴(既有,不變)+ 四條鏈路心跳巡檢(第 5 步新增)。
+            alerts = evaluate(batches) + evaluate_jobs(beats)
             if not alerts:
                 # 無異常也主動回報一則「安好摘要」當心跳(證明 daemon 活著)。
                 # 心跳不是異常,不寫 alert_log(alert_log 保持只記異常)。
-                heartbeat = build_heartbeat(taiwan_date, batches)
+                heartbeat = build_heartbeat(taiwan_date, batches, beats)
                 delivered = send_telegram(heartbeat) if send else False
                 logger.info("[alarm] %s 無異常,推每日安好摘要 delivered=%s", taiwan_date, delivered)
                 print(heartbeat)

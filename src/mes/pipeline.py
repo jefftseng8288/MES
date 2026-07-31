@@ -35,6 +35,7 @@ from mes.ingest import (
     ingest_inferred_domain_success,
     ingest_seed,
 )
+from mes.jobs import JOB_BASELINE, heartbeat
 from mes.normalize import seed_key
 from mes.scrape import REVIEW_APP_HANDLES, fetch_review_page, parse_store_names
 
@@ -215,7 +216,7 @@ async def run_daily_batch(
     statuses: list[str] = []
     batch_id = ""
     try:
-        async with session_maker() as session:
+        async with heartbeat(JOB_BASELINE) as beat, session_maker() as session:
             day_str = datetime.now(_TAIPEI).date().isoformat()
             batch_id = await _resolve_batch_id(session, day_str, slot)
             names = await _gather_new_store_names(session, batch_size, page_sleep=page_sleep)
@@ -239,6 +240,13 @@ async def run_daily_batch(
                 statuses.append(result.status)
                 if seed_sleep and i < len(names) - 1:
                     time.sleep(random.uniform(min_delay, max_delay))
+            # 心跳摘要直接沿用既有 HealthReport 的數字,不另記一份(避免兩套並行)。
+            beat.summary = {
+                "batch_id": batch_id, "requested": batch_size, "actual": len(statuses),
+                "observed": statuses.count("observed"),
+                "not_found": statuses.count("not_found"),
+                "fetch_failed": statuses.count("fetch_failed"),
+            }
     finally:
         if engine is not None:
             await engine.dispose()

@@ -147,7 +147,7 @@
 
 ## 2026-07-11 — Phase 1-C:Scraper + Name→Domain Inference + 雙骨牌寫入鏈路
 
-- **建的檔:** `src/mes/normalize.py`(domain / seed name 正規化,單一收斂)、`src/mes/ingest.py`(雙骨牌寫入鏈路,確定性)、`src/mes/scrape.py`(Loox 評論頁 scraper)、`src/mes/inference.py`(DuckDuckGo Name→Domain)、`tests/test_phase1c_ingest.py`(6 個寫入鏈路測試)。改:`models.py`(entity_type += `store_name_seed`、加 `FEATURES_META`)、migration entity_type CHECK、`pyproject.toml`(+httpx)、`docs/MES_Feature_Taxonomy_v1.md`(元特徵分類軸)。
+- **建的檔:** `src/mes/normalize.py`(domain / seed name 正規化,單一收斂)、`src/mes/ingest.py`(雙骨牌寫入鏈路,確定性)、`src/mes/scrape.py`(Loox 評論頁 scraper)、`src/mes/inference.py`(DuckDuckGo Name→Domain)、`tests/test_phase1c_ingest.py`(6 個寫入鏈路測試)。改:`models.py`(entity_type += `store_name_seed`、加 `FEATURES_META`)、migration entity_type CHECK、`pyproject.toml`(+httpx)、`docs/MES_Feature_Taxonomy_v2.md`(元特徵分類軸)。
 - **受控詞彙(細化,版號不動):** entity_type 加 `store_name_seed`;feature 加 `observed_on_app_store` / `inferred_domain`(feature 欄不 CHECK 鎖,僅登錄)。
 - **雙骨牌結構:** 骨牌一=撈到 Store Name → 建 `store_name_seed` entity + `observed_on_app_store` observation(certain,現場真實)。骨牌二=拿 Seed 推 domain →(A)成功:建 store entity + `inferred_domain`(entity_ref, inferred);(B)失敗:掛 Seed、全欄 NULL、status 依 fetch_failed / not_found 分流。
 
@@ -228,4 +228,4 @@
 - 建立四份專案常駐文件:`task_plan.md`、`CLAUDE.md`、`progress.md`、`findings.md`。
   - `task_plan.md`:已存在,依「修改不重建」原則在既有結構上更新(未整份覆蓋)。
   - `CLAUDE.md`、`progress.md`、`findings.md`:本次新建。
-- 建立前已實際讀取 `docs/` 下六份定稿文件當前內容為依據:`MES_Roadmap_v8.md`(主依據)、`MES_Entity_Model_v1.md`、`MES_Observation_Schema_v1.md`、`MES_Knowledge_Schema_v1.md`、`MES_Feature_Taxonomy_v1.md`、`MES_Build_vs_Buy_Matrix_v1.md`。六份皆存在、檔名相符。
+- 建立前已實際讀取 `docs/` 下六份定稿文件當前內容為依據:`MES_Roadmap_v8.md`(主依據)、`MES_Entity_Model_v1.md`、`MES_Observation_Schema_v1.md`、`MES_Knowledge_Schema_v1.md`、`MES_Feature_Taxonomy_v2.md`、`MES_Build_vs_Buy_Matrix_v1.md`。六份皆存在、檔名相符。

@@ -44,7 +44,12 @@ ENTITY_TYPES = ("store", "review_app", "store_name_seed")
 VALUE_TYPES = ("string", "number", "boolean", "entity_ref", "json")
 # source = 透過什麼「管道」觀測到。web_search added Phase 1-C (inferred_domain via
 # DuckDuckGo web search — do NOT record that as html_page; that lies about provenance).
-SOURCES = ("html_page", "products_json", "html_signature", "web_search", "manual", "monitor")
+# review_widget added 2026-07-31: 評論數來自 review app 自己的 widget 頁面(第三方),
+# 不是店家的 html_page —— 沿用 web_search 先例,寧可補誠實新值,不借語義不符的舊值。
+SOURCES = (
+    "html_page", "products_json", "html_signature", "web_search", "review_widget",
+    "manual", "monitor",
+)
 CONFIDENCE_LEVELS = ("certain", "inferred", "estimated")
 STATUSES = ("observed", "fetch_failed", "not_found")
 
@@ -387,6 +392,40 @@ class InsightStore(Base):
     source_knowledge_refs: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB(none_as_null=True), nullable=False
     )
+
+
+class JobRunLog(Base):
+    """每條鏈路「跑完就記一筆」的心跳(per-run),讓系統能分辨三種狀態。
+
+    **為什麼需要主動上報,而不是去查產出:** 兩種失效在「產出」上長得一樣,但修法天差地遠 ——
+      - `store_harvest` 曾**有跑但原地打轉** 16 天(每批都挑同 3 家假網域)。
+      - `projection` / `insight` 曾**根本沒被 load**、從未執行。
+    只查產出時兩者都只表現為「沒有新資料」,分不出來。有心跳才能分辨
+    **「沒跑」/「跑了但沒產出」/「跑了有產出」**。
+
+    與既有兩個記錄層**不重疊**:`observation_log` 是 per-observation 的事實、
+    `insight_run_log` 是 per-entity 的未產出原因、本表是 **per-run 的執行心跳**。
+    baseline 既有的 HealthReport 數字**餵進本表的 summary**,不另記一份。
+
+    `summary` 各 job 內容不同,但都必須足以讓警鈴判斷「產出 0 是正常閒置還是異常」
+    (例:harvest 記候選池總數 / 被間隔跳過幾家 / 實際挑幾家)。
+    """
+
+    __tablename__ = "job_run_log"
+
+    run_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 不 CHECK 鎖(同 alert_log):未來加新鏈路不必改 schema。
+    job: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)  # success / failed
+    # 產出摘要(即使產出為 0 也要寫 —— 沒產出 ≠ 沒跑)。
+    summary: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class InsightRunLog(Base):

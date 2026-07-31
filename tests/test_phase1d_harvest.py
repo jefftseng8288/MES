@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from mes.config import get_settings
@@ -193,12 +194,85 @@ async def test_harvest_state_flow_and_selection(session: AsyncSession) -> None:
     await session.commit()
     state = await session.get(StoreHarvestState, store.entity_id)
     assert state is not None and state.status == "done"
-    # done -> NOT selectable
+    # 剛嘗試過 -> 最小重抓間隔內,不再挑(不論 done 或 failed,現在是「時間」決定不是「狀態」)
     picked = await _select_stores_to_harvest(session, 10_000_000)
     assert store.entity_id not in [eid for eid, _ in picked]
 
-    # failed -> selectable again (retry)
     await _upsert_state(session, store.entity_id, "failed")
     await session.commit()
     picked = await _select_stores_to_harvest(session, 10_000_000)
-    assert store.entity_id in [eid for eid, _ in picked]
+    assert store.entity_id not in [eid for eid, _ in picked]  # 失敗也一樣要等間隔(天然退避)
+
+
+async def _attempted_at(session: AsyncSession, entity_id: uuid.UUID, when: datetime) -> None:
+    """把某店的最後嘗試時間直接設成 when(模擬「很久以前試過」)。"""
+    await session.execute(
+        update(StoreHarvestState).where(StoreHarvestState.entity_id == entity_id)
+        .values(updated_at=when)
+    )
+    await session.commit()
+
+
+async def test_done_store_is_reharvested_after_interval(session: AsyncSession) -> None:
+    """★ 重抓機制成立的關鍵:done 的店在間隔過後會再次被挑到。
+
+    舊行為是 done 之後永不再抓 → 每家店一輩子只有一筆觀測 → Growth 類 insight 不可能成立。
+    """
+    store = await _make_store(session)
+    await _upsert_state(session, store.entity_id, "done")
+    await session.commit()
+    assert store.entity_id not in [
+        eid for eid, _ in await _select_stores_to_harvest(session, 10_000_000)
+    ]
+    # 上次嘗試是 8 天前(> 7 天間隔)-> 重新成為候選
+    await _attempted_at(session, store.entity_id, datetime.now(UTC) - timedelta(days=8))
+    assert store.entity_id in [
+        eid for eid, _ in await _select_stores_to_harvest(session, 10_000_000)
+    ]
+
+
+async def test_never_attempted_ranks_before_previously_attempted(session: AsyncSession) -> None:
+    """沒試過的優先於試過的(即使那家試過的已超過間隔很久)。"""
+    old = await _make_store(session)
+    await _upsert_state(session, old.entity_id, "done")
+    await session.commit()
+    await _attempted_at(session, old.entity_id, datetime.now(UTC) - timedelta(days=99))
+    fresh = await _make_store(session)  # 從未嘗試
+
+    order = [eid for eid, _ in await _select_stores_to_harvest(session, 10_000_000)]
+    assert order.index(fresh.entity_id) < order.index(old.entity_id)
+
+
+async def test_oldest_attempt_first_among_attempted(session: AsyncSession) -> None:
+    """試過的之中,最久沒試的優先(這就是天然退避:試過的排到隊尾)。"""
+    older, newer = await _make_store(session), await _make_store(session)
+    for s in (older, newer):
+        await _upsert_state(session, s.entity_id, "done")
+    await session.commit()
+    await _attempted_at(session, older.entity_id, datetime.now(UTC) - timedelta(days=60))
+    await _attempted_at(session, newer.entity_id, datetime.now(UTC) - timedelta(days=30))
+
+    order = [eid for eid, _ in await _select_stores_to_harvest(session, 10_000_000)]
+    assert order.index(older.entity_id) < order.index(newer.entity_id)
+
+
+async def test_failed_store_does_not_block_others(session: AsyncSession) -> None:
+    """★ 卡死修復:一直失敗的店不會霸佔名額,下一批換別家。
+
+    舊行為:ORDER BY created_at + failed 永遠是候選 → 每批都挑同一批失敗的店
+    (實測曾連續 16 天只抓同 3 家假網域)。
+    """
+    stuck = await _make_store(session)  # 較早建立、且一直失敗
+    others = [await _make_store(session) for _ in range(3)]
+
+    # 都沒試過時,stuck 建立較早 -> 排在其他家前面(舊邏輯也是如此)
+    order = [eid for eid, _ in await _select_stores_to_harvest(session, 10_000_000)]
+    assert all(order.index(stuck.entity_id) < order.index(o.entity_id) for o in others)
+
+    await _upsert_state(session, stuck.entity_id, "failed")  # 抓失敗了
+    await session.commit()
+
+    # ★ 關鍵:失敗後它排到其他家「後面」(舊邏輯會讓它永遠排最前 -> 卡死)
+    order = [eid for eid, _ in await _select_stores_to_harvest(session, 10_000_000)]
+    assert stuck.entity_id not in order  # 間隔內先完全退出候選
+    assert all(o.entity_id in order for o in others)  # 名額讓給別家

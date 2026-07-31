@@ -3,7 +3,7 @@
 > 用途:這是 Claude Code 每次在本專案動手前必讀的常駐規則。內容自足,不依賴、不引用任何外部專案的檔案。
 > 依據文件(以 `docs/` 下實體文件當前內容為準,不用記憶版本):
 > `MES_Roadmap_v8.md`(主依據)、`MES_Entity_Model_v1.md`、`MES_Observation_Schema_v1.md`、
-> `MES_Knowledge_Schema_v1.md`、`MES_Feature_Taxonomy_v1.md`、`MES_Build_vs_Buy_Matrix_v1.md`。
+> `MES_Knowledge_Schema_v1.md`、`MES_Feature_Taxonomy_v2.md`、`MES_Build_vs_Buy_Matrix_v1.md`。
 
 ---
 

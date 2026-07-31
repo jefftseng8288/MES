@@ -29,7 +29,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -40,10 +40,26 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from mes.config import get_settings
 from mes.db.models import Entity, ObservationLog, StoreHarvestState
+from mes.jobs import JOB_HARVEST, heartbeat
+from mes.reviews import (
+    FEATURE_AVG_RATING,
+    FEATURE_RATING_DISTRIBUTION,
+    FEATURE_REVIEW_COUNT,
+    SOURCE_REVIEW_WIDGET,
+    ReviewStats,
+    fetch_review_stats,
+)
 
 # producer for store-facing harvest (distinct from crawler / duckduckgo). NOT NULL + CHECK.
 PRODUCER_STORE_CRAWLER = "mes_store_crawler_v1"
-STORE_BATCH_SIZE = 3  # 每批 1–3 家(暫定起點,待戳店面實況回饋調整)
+# 每批家數。**限流性質與 baseline 不同,故可比 baseline 寬鬆:** baseline 戳的是同一個
+# DuckDuckGo(總頻率必須控制);harvest 戳的是**每家店自己的伺服器、每家只戳一次** →
+# 限流是 per-domain 的。同批抓 N 家不同店,對每一家而言都只是一次請求。
+# 「對單一店家的頻率」由 MIN_RETRY_INTERVAL_DAYS 控制,不是靠壓低批量。(暫定值,可調)
+STORE_BATCH_SIZE = 15
+# 最小重抓間隔:此期間內已嘗試過的店本輪跳過(暫定 7 天,待實況調整)。
+# 保護用途:候選店數少時,避免同一家在短時間內被反覆戳。
+MIN_RETRY_INTERVAL_DAYS = 7
 _HARVEST_LOG = Path("logs/harvest_features.log")
 
 # --- Feature -> source / confidence -----------------------------------------
@@ -256,15 +272,66 @@ def parse_homepage_features(
     return results
 
 
+def parse_review_features(stats: ReviewStats) -> list[FeatureResult]:
+    """把一次評論採集結果轉成 3 個 FeatureResult(三值語義由 stats.status 承載)。
+
+    confidence:review app 自報的數字是直讀 → `certain`;
+    avg_rating 若由分佈**計算**而來(頁面沒直接給)→ 降級為 `estimated`,誠實標記。
+    """
+    src = SOURCE_REVIEW_WIDGET
+    if stats.status != "observed":
+        return [
+            _absent(FEATURE_REVIEW_COUNT, stats.status, "number", src, "certain"),
+            _absent(FEATURE_AVG_RATING, stats.status, "number", src, "certain"),
+            _absent(FEATURE_RATING_DISTRIBUTION, stats.status, "json", src, "certain"),
+        ]
+
+    out = [FeatureResult(
+        FEATURE_REVIEW_COUNT, "observed", "number", "certain", src,
+        value_raw=str(stats.review_count), value_number=float(stats.review_count or 0),
+    )]
+    if stats.avg_rating is None:
+        out.append(_absent(FEATURE_AVG_RATING, "not_found", "number", src, "certain"))
+    else:
+        out.append(FeatureResult(
+            FEATURE_AVG_RATING, "observed", "number",
+            "estimated" if stats.avg_is_computed else "certain", src,
+            value_raw=f"{stats.avg_rating:g}", value_number=float(stats.avg_rating),
+        ))
+    if stats.distribution is None:
+        # 驗算不符或頁面沒給 → 確認這次拿不到可信分佈(不靜默採用壞資料)。
+        out.append(_absent(FEATURE_RATING_DISTRIBUTION, "not_found", "json", src, "certain"))
+    else:
+        out.append(FeatureResult(
+            FEATURE_RATING_DISTRIBUTION, "observed", "json", "certain", src,
+            value_raw=json.dumps(stats.distribution, sort_keys=True),
+            value_json=dict(stats.distribution),
+        ))
+    return out
+
+
 def harvest_store(
     domain: str, review_apps: dict[str, uuid.UUID], *, req_sleep: bool = True
 ) -> list[FeatureResult]:
-    """Poke one store (products.json + homepage) and return the 9 FeatureResults."""
+    """Poke one store (products.json + homepage + reviews) -> 12 FeatureResults.
+
+    ★ 順序有依賴:評論數要先知道店家用哪個 review app(才知道用哪套 handler),
+    故必須在 `parse_homepage_features` 解析出 uses_review_app **之後**才做。
+    """
     with httpx.Client(headers={"User-Agent": _USER_AGENT}, timeout=20.0) as client:
         pf = fetch_products(domain, client, req_sleep=req_sleep)
         _sleep(req_sleep)
         html = fetch_homepage(domain, client)
-    return parse_products_features(pf) + parse_homepage_features(html, review_apps)
+        home_features = parse_homepage_features(html, review_apps)
+        # 由 uses_review_app 的結果決定用哪個 handler(認不出 -> app_key None -> not_found)。
+        ura = next(r for r in home_features if r.feature == FEATURE_USES_REVIEW_APP)
+        app_key = None
+        if ura.status == "observed" and ura.value_entity_id is not None:
+            app_key = next(
+                (k for k, v in review_apps.items() if v == ura.value_entity_id), None
+            )
+        stats = fetch_review_stats(domain, html, app_key, client, sleep=req_sleep)
+    return parse_products_features(pf) + home_features + parse_review_features(stats)
 
 
 # --- Batch runner (independent schedule; writes onto the store entity) --------
@@ -273,7 +340,7 @@ def harvest_store(
 @dataclass(frozen=True)
 class HarvestReport:
     batch_id: str
-    stores: list[tuple[str, list[FeatureResult]]]  # (domain, 9 results)
+    stores: list[tuple[str, list[FeatureResult]]]  # (domain, 12 results)
 
     def format(self) -> str:
         lines = ["===== MES 市場 feature 撈取報告 (Store Harvest) =====",
@@ -284,7 +351,7 @@ class HarvestReport:
             nf = sum(r.status == "not_found" for r in results)
             ff = sum(r.status == "fetch_failed" for r in results)
             got = {r.feature: r.value_raw for r in results if r.status == "observed"}
-            lines.append(f"  {domain}: observed {obs}/9 · not_found {nf} · fetch_failed {ff}")
+            lines.append(f"  {domain}: observed {obs}/12 · not_found {nf} · fetch_failed {ff}")
             lines.append(f"     {got}")
         lines.append("=" * 46)
         return "\n".join(lines)
@@ -298,23 +365,75 @@ async def _load_review_apps(session: AsyncSession) -> dict[str, uuid.UUID]:
 
 
 async def _select_stores_to_harvest(
-    session: AsyncSession, limit: int
+    session: AsyncSession, limit: int, *, now: datetime | None = None
 ) -> list[tuple[uuid.UUID, str]]:
-    """Stores with a domain whose harvest is pending/failed (no 'done' state yet)."""
+    """挑「最久沒嘗試的」店 —— 沒試過的優先,其次依上次嘗試時間由舊到新。
+
+    **為什麼不是「只挑沒抓成功過的」(舊做法):**
+    舊條件是 `state IS NULL OR status IN (pending, failed)` + `ORDER BY entity.created_at`,
+    有兩個致命後果:
+      1. **卡死(head-of-line blocking):** 失敗的店永遠留在候選、又永遠排最前 → 每批都挑
+         同樣那幾家、又失敗、再挑 —— 實測曾連續 16 天(125 批)只抓同 3 家假網域。
+      2. **`done` 的店永不重抓 → 每家一輩子只有一筆觀測。** 那樣 `feature_history` 每個
+         feature 永遠只有一個點,**Growth 類 insight 從架構上不可能成立**,且資料抓完
+         當天就開始過期、永不更新 —— 與「資料是流動的」直接牴觸。
+
+    **現行做法:所有 store 都是候選**(含 `done`),依「最久沒嘗試」排序。
+    `store_harvest_state.updated_at` 由 `_upsert_state` 在**每次嘗試後**更新(不論成功或
+    失敗),故它就是「最後嘗試時間」—— 這是本排序能運作的前提。
+
+    **天然退避:** 試過的店排到隊尾,要輪完一圈才會再輪到,不必另設退避時間或失敗次數上限。
+    **實際重抓週期 = 候選店數 ÷ 每日抓取量,自適應**,不需另外設定。
+    另加 `MIN_RETRY_INTERVAL_DAYS` 最小重抓間隔作保護(候選店少時避免同一家被反覆戳)。
+    """
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=MIN_RETRY_INTERVAL_DAYS)
     rows = await session.execute(
         select(Entity.entity_id, Entity.canonical_key)
         .outerjoin(StoreHarvestState, StoreHarvestState.entity_id == Entity.entity_id)
         .where(
             Entity.entity_type == "store",
+            # 沒嘗試過 → 一定是候選;嘗試過 → 需超過最小重抓間隔。
             or_(
                 StoreHarvestState.entity_id.is_(None),
-                StoreHarvestState.status.in_(["pending", "failed"]),
+                StoreHarvestState.updated_at < cutoff,
             ),
         )
-        .order_by(Entity.created_at)
+        # 沒試過的(NULL)排最前,其餘最久沒試的優先;同時間用 created_at 決定性收尾。
+        .order_by(StoreHarvestState.updated_at.asc().nulls_first(), Entity.created_at)
         .limit(limit)
     )
     return [(eid, key) for eid, key in rows.all()]
+
+
+async def candidate_pool_stats(
+    session: AsyncSession, *, now: datetime | None = None
+) -> dict[str, int]:
+    """候選池概況 —— ★ 警鈴用來分辨「挑到 0 家」是**正常閒置**還是**異常**的依據。
+
+    - `eligible` = 現在可挑的家數(沒試過,或已超過最小重抓間隔)。
+    - `gated_by_interval` = 因為在最小重抓間隔內而本輪跳過的家數。
+
+    判讀:挑到 0 家且 `eligible == 0` → 全被間隔 gate 住,**正常閒置**(自適應的結果);
+    挑到 0 家但 `eligible > 0` → **挑選邏輯異常**,該叫。
+    """
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=MIN_RETRY_INTERVAL_DAYS)
+    total = await session.scalar(
+        select(func.count()).select_from(Entity).where(Entity.entity_type == "store")
+    )
+    eligible = await session.scalar(
+        select(func.count())
+        .select_from(Entity)
+        .outerjoin(StoreHarvestState, StoreHarvestState.entity_id == Entity.entity_id)
+        .where(
+            Entity.entity_type == "store",
+            or_(
+                StoreHarvestState.entity_id.is_(None),
+                StoreHarvestState.updated_at < cutoff,
+            ),
+        )
+    )
+    total, eligible = int(total or 0), int(eligible or 0)
+    return {"stores_total": total, "eligible": eligible, "gated_by_interval": total - eligible}
 
 
 async def _write_feature(
@@ -371,21 +490,33 @@ async def run_store_harvest_batch(
     stores_done: list[tuple[str, list[FeatureResult]]] = []
     batch_id = ""
     try:
-        async with session_maker() as session:
+        async with heartbeat(JOB_HARVEST) as beat, session_maker() as session:
             day_str = datetime.now(_TAIPEI).date().isoformat()
             batch_id = await _resolve_batch_id(session, day_str, None)
             review_apps = await _load_review_apps(session)
+            # 先拍候選池快照 —— 挑到 0 家時,警鈴靠它分辨正常閒置 vs 挑選邏輯異常。
+            pool = await candidate_pool_stats(session)
             targets = await _select_stores_to_harvest(session, batch_size)
+            written = 0
             for i, (store_id, domain) in enumerate(targets):
                 results = harvest_store(domain, review_apps, req_sleep=req_sleep)
                 for r in results:
                     await _write_feature(session, store_id, batch_id, r)
+                    written += 1
                 reachable = any(r.status != "fetch_failed" for r in results)
                 await _upsert_state(session, store_id, "done" if reachable else "failed")
                 await session.commit()
                 stores_done.append((domain, results))
                 if store_sleep and i < len(targets) - 1:
                     _sleep(True)
+            beat.summary = {
+                "batch_id": batch_id, "batch_size": batch_size, **pool,
+                "selected": len(targets),
+                "reachable": sum(
+                    1 for _, rs in stores_done if any(r.status != "fetch_failed" for r in rs)
+                ),
+                "observations_written": written,
+            }
     finally:
         if engine is not None:
             await engine.dispose()

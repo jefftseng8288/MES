@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from mes.config import get_settings
 from mes.db.models import KnowledgeState, ObservationLog
+from mes.jobs import JOB_PROJECTION, heartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -176,8 +177,9 @@ async def run_projection(
         engine = create_async_engine(get_settings().database_url)
         session_maker = async_sessionmaker(bind=engine, expire_on_commit=False)
     try:
-        async with session_maker() as session:
+        async with heartbeat(JOB_PROJECTION) as beat, session_maker() as session:
             written = await rebuild_knowledge_state(session)
+            beat.summary = {"rows_written": written}
             print(f"[projection] knowledge_state rebuilt: {written} rows")
             return written
     finally:

@@ -8,27 +8,41 @@ from __future__ import annotations
 import random
 import uuid
 from collections.abc import AsyncGenerator
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from mes.alarm import (
     ALERT_FETCH_FAILED_HIGH,
+    ALERT_JOB_FAILED,
+    ALERT_JOB_MISSING,
+    ALERT_JOB_NO_OUTPUT,
     ALERT_SUPPLY_LOW,
     ALERT_ZERO_OBSERVED,
     BatchStats,
+    JobBeat,
     build_heartbeat,
     build_message,
     evaluate,
+    evaluate_jobs,
     load_today_batches,
     run_alarm_check,
 )
 from mes.config import get_settings
-from mes.db.models import AlertLog
+from mes.db.models import AlertLog, JobRunLog
 from mes.ingest import ingest_inferred_domain_failure, ingest_inferred_domain_success, ingest_seed
+from mes.jobs import (
+    JOB_BASELINE,
+    JOB_HARVEST,
+    JOB_INSIGHT,
+    JOB_PROJECTION,
+    heartbeat,
+)
 
 
 @pytest_asyncio.fixture
@@ -176,6 +190,15 @@ async def test_run_alarm_check_records_when_fired_and_silent_otherwise(
     assert rows[0].detail is not None and "batches" in rows[0].detail
 
     # A healthy day -> no alerts, no records (heartbeat is sent but not recorded to alert_log).
+    # 第 5 步起,四條鏈路的心跳也納入巡檢 -> 得先寫入健康心跳,否則會因「從無心跳」而觸發。
+    for job, summary in (
+        (JOB_BASELINE, {"observed": 30}),
+        (JOB_HARVEST, {"selected": 15, "eligible": 500}),
+        (JOB_PROJECTION, {"rows_written": 100}),
+        (JOB_INSIGHT, {"entities": 5, "produced": 5}),
+    ):
+        async with heartbeat(job, session_maker=maker) as beat:
+            beat.summary = summary
     day2 = _uniq_date()
     await _seed_batch(session, f"{day2}-01", observed=30, not_found=0, fetch_failed=0)
     await _seed_batch(session, f"{day2}-02", observed=30, not_found=0, fetch_failed=0)
@@ -201,3 +224,134 @@ def test_build_heartbeat_summarises_three_batches() -> None:
     assert "每日安好" in msg and "2099-01-01" in msg
     assert "02:00:seeds 30 / observed 28" in msg
     assert "無警鈴" in msg
+
+
+# --- 第 5 步:各鏈路心跳 + 警鈴擴充 ------------------------------------------
+
+
+def _beat(job: str, *, hours_ago: float | None = 1.0, status: str = "success",
+          summary: dict[str, Any] | None = None, runs_today: int = 1) -> JobBeat:
+    last = None if hours_ago is None else datetime.now(UTC) - timedelta(hours=hours_ago)
+    return JobBeat(job=job, last_run=last, last_status=status if last else None,
+                   last_summary=summary or {}, runs_today=runs_today)
+
+
+def _healthy_beats() -> dict[str, JobBeat]:
+    return {
+        JOB_BASELINE: _beat(JOB_BASELINE, summary={"observed": 20}, runs_today=3),
+        JOB_HARVEST: _beat(JOB_HARVEST, summary={"selected": 15, "eligible": 500}, runs_today=8),
+        JOB_PROJECTION: _beat(JOB_PROJECTION, summary={"rows_written": 1500}),
+        JOB_INSIGHT: _beat(JOB_INSIGHT, summary={"entities": 14, "produced": 12}),
+    }
+
+
+def test_all_jobs_healthy_no_alert() -> None:
+    assert evaluate_jobs(_healthy_beats()) == []
+
+
+def test_job_never_ran_fires() -> None:
+    """★ 這次的實況:projection / insight 從未被 load、從無心跳。"""
+    beats = _healthy_beats()
+    beats[JOB_PROJECTION] = _beat(JOB_PROJECTION, hours_ago=None)
+    alerts = evaluate_jobs(beats)
+    assert [a.alert_type for a in alerts] == [ALERT_JOB_MISSING]
+    assert "從無任何心跳" in alerts[0].detection and "沒 load" in alerts[0].diagnosis
+
+
+def test_job_silent_beyond_grace_fires() -> None:
+    beats = _healthy_beats()
+    beats[JOB_HARVEST] = _beat(JOB_HARVEST, hours_ago=20)  # harvest 寬限 9 小時
+    alerts = [a for a in evaluate_jobs(beats) if a.alert_type == ALERT_JOB_MISSING]
+    assert len(alerts) == 1 and "20.0 小時沒有心跳" in alerts[0].detection
+
+
+def test_job_within_grace_does_not_fire() -> None:
+    """★ 防誤報:insight 23:40 跑、警鈴 23:50 巡檢,只差 10 分鐘不能誤判成沒跑。"""
+    beats = _healthy_beats()
+    beats[JOB_INSIGHT] = _beat(JOB_INSIGHT, hours_ago=0.17, summary={"entities": 5})
+    assert evaluate_jobs(beats) == []
+
+
+def test_job_failed_fires() -> None:
+    beats = _healthy_beats()
+    beats[JOB_BASELINE] = _beat(JOB_BASELINE, status="failed", summary={"observed": 0})
+    alerts = [a for a in evaluate_jobs(beats) if a.alert_type == ALERT_JOB_FAILED]
+    assert len(alerts) == 1 and "執行失敗" in alerts[0].detection
+
+
+def test_harvest_normal_idle_does_not_fire() -> None:
+    """★ 正常閒置不誤報:候選池全被最小重抓間隔 gate 住 → 挑 0 家是自適應的正常結果。"""
+    beats = _healthy_beats()
+    beats[JOB_HARVEST] = _beat(
+        JOB_HARVEST, summary={"selected": 0, "eligible": 0, "gated_by_interval": 592}, runs_today=8)
+    assert evaluate_jobs(beats) == []
+
+
+def test_harvest_zero_selected_with_pool_fires() -> None:
+    """★ 異常正確報:有 500 家可抓卻挑到 0 家 → 挑選邏輯壞了。"""
+    beats = _healthy_beats()
+    beats[JOB_HARVEST] = _beat(
+        JOB_HARVEST, runs_today=8,
+        summary={"selected": 0, "eligible": 500, "gated_by_interval": 92})
+    alerts = [a for a in evaluate_jobs(beats) if a.alert_type == ALERT_JOB_NO_OUTPUT]
+    assert len(alerts) == 1
+    assert "500 家可抓,卻挑到 0 家" in alerts[0].detection
+    assert "非最小間隔造成的正常閒置" in alerts[0].diagnosis
+
+
+def test_projection_zero_rows_fires() -> None:
+    beats = _healthy_beats()
+    beats[JOB_PROJECTION] = _beat(JOB_PROJECTION, summary={"rows_written": 0})
+    assert [a.alert_type for a in evaluate_jobs(beats)] == [ALERT_JOB_NO_OUTPUT]
+
+
+def test_baseline_three_alarms_unchanged() -> None:
+    """既有 baseline 三警鈴行為不變(心跳擴充不得弄壞它)。"""
+    batches = [_b(1, seeds=30, observed=0, fetch_failed=30), _b(2, seeds=30, observed=30),
+               _b(3, seeds=30, observed=30)]
+    zeros = [a for a in evaluate(batches) if a.alert_type == ALERT_ZERO_OBSERVED]
+    assert len(zeros) == 1 and "限流" in zeros[0].diagnosis
+
+
+def test_daily_heartbeat_includes_four_chains() -> None:
+    batches = [_b(1, seeds=30, observed=29), _b(2, seeds=30, observed=30),
+               _b(3, seeds=30, observed=30)]
+    msg = build_heartbeat("2099-01-01", batches, _healthy_beats())
+    assert "四條鏈路" in msg
+    for label in ("baseline", "harvest", "投影", "Insight"):
+        assert label in msg
+    assert "seeds 30 / observed 29" in msg  # 既有內容保留
+
+
+def test_daily_heartbeat_shows_harvest_idle_as_normal() -> None:
+    """★ harvest 正常閒置在每日安好要顯示為「閒置」,不是失效。"""
+    beats = _healthy_beats()
+    beats[JOB_HARVEST] = _beat(
+        JOB_HARVEST, summary={"selected": 0, "eligible": 0, "gated_by_interval": 592}, runs_today=8)
+    msg = build_heartbeat("2099-01-01", [], beats)
+    assert "閒置" in msg and "正常" in msg
+
+
+# --- 心跳實際寫入 DB(真連 DB)-----------------------------------------------
+
+
+async def test_heartbeat_writes_row_even_with_zero_output(session: AsyncSession) -> None:
+    """★ 產出為 0 也要寫心跳 —— 沒產出 ≠ 沒跑,這是整個機制的重點。"""
+    maker = async_sessionmaker(bind=session.bind, expire_on_commit=False)
+    job = f"testjob_{uuid.uuid4().hex[:8]}"
+    async with heartbeat(job, session_maker=maker) as beat:
+        beat.summary = {"selected": 0, "eligible": 0}
+    row = await session.scalar(select(JobRunLog).where(JobRunLog.job == job))
+    assert row is not None and row.status == "success"
+    assert row.summary == {"selected": 0, "eligible": 0}
+
+
+async def test_heartbeat_records_failure_and_reraises(session: AsyncSession) -> None:
+    maker = async_sessionmaker(bind=session.bind, expire_on_commit=False)
+    job = f"testjob_{uuid.uuid4().hex[:8]}"
+    with pytest.raises(RuntimeError):
+        async with heartbeat(job, session_maker=maker):
+            raise RuntimeError("boom")
+    row = await session.scalar(select(JobRunLog).where(JobRunLog.job == job))
+    assert row is not None and row.status == "failed"
+    assert row.error is not None and "boom" in row.error

@@ -11,7 +11,7 @@
 | `docs/MES_Entity_Model_v1.md` | v1.0(2026-06-27 定稿) | Entity Model |
 | `docs/MES_Observation_Schema_v1.md` | v1.0(2026-06-27 定稿) | Observation Schema |
 | `docs/MES_Knowledge_Schema_v1.md` | v1.0(2026-06-27 定稿) | Knowledge Schema |
-| `docs/MES_Feature_Taxonomy_v1.md` | v1(2026-06-27 定稿) | Feature Taxonomy |
+| `docs/MES_Feature_Taxonomy_v2.md` | v1(2026-06-27 定稿) | Feature Taxonomy |
 | `docs/MES_Build_vs_Buy_Matrix_v1.md` | v1(2026-07-03 定稿) | Build vs Buy Matrix |
 
 **最後更新日期:** 2026-07-11

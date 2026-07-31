@@ -281,7 +281,7 @@ Hypothesis A
 
 **Phase 0 狀態:✅ 完成(五份全定稿)。** 對應實體文件:
 `MES_Entity_Model_v1.md`、`MES_Observation_Schema_v1.md`、`MES_Knowledge_Schema_v1.md`、
-`MES_Feature_Taxonomy_v1.md`、Principles(在本 Roadmap 內)。另有配套 `MES_Build_vs_Buy_Matrix_v1.md`。
+`MES_Feature_Taxonomy_v2.md`、Principles(在本 Roadmap 內)。另有配套 `MES_Build_vs_Buy_Matrix_v1.md`。
 
 ### Entity Model 的設計要點(v2 新增,最重要)
 
@@ -370,7 +370,7 @@ Hypothesis A
 
 ### 第一版抓取的 Feature 範圍
 
-依 `MES_Feature_Taxonomy_v1.md`(9 個 feature):
+依 `MES_Feature_Taxonomy_v2.md`(9 個 feature):
 - Technology Stack:`uses_review_app`(entity_ref)、`theme_name`
 - Business Signals:`product_count`、`avg_price`、`price_range`(從 /products.json)
 - Company:`country`、`language`、`currency`

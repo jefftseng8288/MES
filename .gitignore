@@ -32,3 +32,6 @@ logs/
 .vscode/
 .idea/
 *.swp
+
+# DB 備份(含真實資料,絕不進版控)
+backups/
