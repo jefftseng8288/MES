@@ -355,3 +355,55 @@ async def test_heartbeat_records_failure_and_reraises(session: AsyncSession) -> 
     row = await session.scalar(select(JobRunLog).where(JobRunLog.job == job))
     assert row is not None and row.status == "failed"
     assert row.error is not None and "boom" in row.error
+
+
+# --- baseline 診斷改讀心跳(2026-08-01 修正誤診)-----------------------------
+
+
+def test_zero_observed_with_heartbeat_not_misdiagnosed_as_daemon_dead() -> None:
+    """★ 有心跳但撈到 0 → 不可再誤診為「daemon 沒跑」。
+
+    真實誤診案例(2026-07-31 02:00):baseline 有跑、健康報告白紙黑字寫「批次筆數 0」,
+    警鈴卻報「批次無記錄 → daemon 沒跑」—— 把人往錯的方向查。錯的診斷比不報更糟。
+    """
+    b = _b(1, seeds=0, observed=0, exists=False)  # observation_log 上查無此批
+    beats = {b.batch_id: {"batch_id": b.batch_id, "actual": 0, "requested": 30}}
+    alerts = evaluate([b, _b(2, seeds=30, observed=30), _b(3, seeds=30, observed=30)], beats)
+    d = next(a.diagnosis for a in alerts if a.alert_type == ALERT_ZERO_OBSERVED)
+    assert "daemon 有跑" in d and "供給問題" in d
+    assert "非執行異常" in d  # 明確排除執行異常
+    assert "daemon 沒跑" not in d  # 關鍵:不再出現那句誤導人的診斷
+
+
+def test_zero_observed_without_heartbeat_still_reports_execution_anomaly() -> None:
+    """無心跳 → 仍要正確報執行異常(不能因為修了誤診就變成什麼都不報)。"""
+    b = _b(1, seeds=0, observed=0, exists=False)
+    alerts = evaluate([b, _b(2, seeds=30, observed=30), _b(3, seeds=30, observed=30)], {})
+    d = next(a.diagnosis for a in alerts if a.alert_type == ALERT_ZERO_OBSERVED)
+    assert "執行異常" in d and "無心跳" in d
+
+
+def test_zero_observed_with_heartbeat_hitting_cap_says_so() -> None:
+    """撈到 0 且觸頂 → 診斷要指出「觸及我們自己的上限,不代表市場沒有了」。"""
+    b = _b(1, seeds=0, observed=0, exists=False)
+    beats = {b.batch_id: {"batch_id": b.batch_id, "actual": 0,
+                          "hit_cap": True, "stop_reason": "time_limit", "last_page": 310}}
+    alerts = evaluate([b, _b(2, seeds=30, observed=30), _b(3, seeds=30, observed=30)], beats)
+    d = next(a.diagnosis for a in alerts if a.alert_type == ALERT_ZERO_OBSERVED)
+    assert "觸及我們自己設的上限" in d and "不代表市場沒有了" in d
+
+
+def test_zero_observed_with_seeds_still_uses_inference_branches() -> None:
+    """有跑也撈到 Seed,卻 0 observed → 仍走既有的推論失敗分支(不被心跳短路)。"""
+    b = _b(1, seeds=30, observed=0, fetch_failed=30)
+    beats = {b.batch_id: {"batch_id": b.batch_id, "actual": 30}}
+    alerts = evaluate([b, _b(2, seeds=30, observed=30), _b(3, seeds=30, observed=30)], beats)
+    d = next(a.diagnosis for a in alerts if a.alert_type == ALERT_ZERO_OBSERVED)
+    assert "限流" in d  # fetch_failed 佔滿的既有診斷仍生效
+
+
+def test_evaluate_without_beats_keeps_old_behaviour() -> None:
+    """不傳 batch_beats 時退回舊行為(既有呼叫端與測試不受影響)。"""
+    batches = [_b(1, seeds=0, observed=0, exists=False), _b(2, seeds=30, observed=30),
+               _b(3, seeds=30, observed=30)]
+    assert any(a.alert_type == ALERT_ZERO_OBSERVED for a in evaluate(batches))

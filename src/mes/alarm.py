@@ -123,10 +123,59 @@ async def load_today_batches(session: AsyncSession, taiwan_date: str) -> list[Ba
     return stats
 
 
-def _diagnose_zero_observed(b: BatchStats) -> str:
-    """0 observed 的原因分辨(對應完全不同的調整方向)。"""
-    if not b.exists:
-        return "批次無記錄 → 批次執行異常(daemon 沒跑 / 報錯,疑似系統問題)"
+async def load_baseline_batch_beats(
+    session: AsyncSession, taiwan_date: str
+) -> dict[str, dict[str, Any]]:
+    """讀當天 baseline 各批的心跳 summary,以 batch_id 為鍵。
+
+    心跳是 per-run 的,而診斷要問的是「**這一批**跑了沒」,故以 summary 裡的 batch_id 對應。
+    """
+    rows = (
+        await session.execute(
+            select(JobRunLog).where(
+                JobRunLog.job == JOB_BASELINE,
+                func.to_char(func.timezone("Asia/Taipei", JobRunLog.finished_at), "YYYY-MM-DD")
+                == taiwan_date,
+            )
+        )
+    ).scalars().all()
+    beats: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        batch_id = (r.summary or {}).get("batch_id")
+        if batch_id:
+            beats[str(batch_id)] = r.summary or {}
+    return beats
+
+
+def _diagnose_zero_observed(b: BatchStats, beat_summary: dict[str, Any] | None = None) -> str:
+    """0 observed 的原因分辨(對應完全不同的調整方向)。
+
+    ★ **先讀心跳,再看 observation_log。** 因為「沒跑」與「跑了但一個新 Seed 都沒撈到」
+    在 observation_log 上**長得一模一樣**(都是查無此批號)—— 這正是心跳存在的理由。
+    先前沒讀心跳時,此函式會把「有跑但撈到 0」誤診為「daemon 沒跑」,**把人往錯的方向查**
+    (實測 2026-07-31 02:00 那批就被誤診過)。**錯的診斷比不報更糟。**
+
+    `beat_summary` = 該批號對應的 baseline 心跳 summary;None 表示查無心跳。
+    """
+    if beat_summary is not None:
+        # 有心跳 = daemon 確實跑了 -> 排除「執行異常」,往供給/限流方向診斷。
+        gathered = int(beat_summary.get("actual", 0))
+        if gathered == 0:
+            extra = ""
+            if beat_summary.get("hit_cap"):
+                extra = (
+                    f"(且**觸及我們自己設的上限**:{beat_summary.get('stop_reason')},"
+                    f"翻到第 {beat_summary.get('last_page')} 頁 —— 不代表市場沒有了)"
+                )
+            return (
+                "✅ daemon 有跑(心跳存在),但一個新 Seed 都沒撈到 → "
+                f"**Seed 來源供給問題,非執行異常**{extra}"
+            )
+        # 有跑也撈到 Seed,卻 0 observed -> 落到下面的推論失敗分支。
+    elif not b.exists:
+        return (
+            "批次無記錄**且無心跳** → 批次執行異常(daemon 沒跑 / 報錯 / 沒 load,疑似系統問題)"
+        )
     if b.seeds == 0:
         return "無新 Seed(供給 0)→ 池子乾(該加來源)"
     if b.fetch_failed > 0 and b.fetch_failed >= b.not_found:
@@ -136,8 +185,15 @@ def _diagnose_zero_observed(b: BatchStats) -> str:
     return "0 observed 但成因不明確,需人工查看"
 
 
-def evaluate(batches: list[BatchStats]) -> list[Alert]:
-    """三警鈴巡檢。回傳觸發的 Alert(可多個,合併推送)。"""
+def evaluate(
+    batches: list[BatchStats], batch_beats: dict[str, dict[str, Any]] | None = None
+) -> list[Alert]:
+    """三警鈴巡檢。回傳觸發的 Alert(可多個,合併推送)。
+
+    `batch_beats` = batch_id -> 該批 baseline 心跳的 summary(見 load_baseline_batch_beats)。
+    給了才能分辨「沒跑」vs「跑了但撈到 0」;不給則退回舊行為(僅看 observation_log)。
+    """
+    batch_beats = batch_beats or {}
     day_snapshot = [b.as_dict() for b in batches]
     thresholds = {
         "supply_low": SUPPLY_LOW_THRESHOLD, "fetch_failed_high": FETCH_FAILED_HIGH_THRESHOLD,
@@ -150,7 +206,7 @@ def evaluate(batches: list[BatchStats]) -> list[Alert]:
             alerts.append(Alert(
                 ALERT_ZERO_OBSERVED,
                 detection=f"{b.label} observed = 0",
-                diagnosis=_diagnose_zero_observed(b),
+                diagnosis=_diagnose_zero_observed(b, batch_beats.get(b.batch_id)),
                 detail={"trigger_slot": b.slot, "batches": day_snapshot, "thresholds": thresholds},
             ))
 
@@ -373,8 +429,9 @@ async def run_alarm_check(
         async with session_maker() as session:
             batches = await load_today_batches(session, taiwan_date)
             beats = await load_job_beats(session, taiwan_date)
-            # baseline 三警鈴(既有,不變)+ 四條鏈路心跳巡檢(第 5 步新增)。
-            alerts = evaluate(batches) + evaluate_jobs(beats)
+            batch_beats = await load_baseline_batch_beats(session, taiwan_date)
+            # baseline 三警鈴(既有,不變;診斷改讀心跳)+ 四條鏈路心跳巡檢。
+            alerts = evaluate(batches, batch_beats) + evaluate_jobs(beats)
             if not alerts:
                 # 無異常也主動回報一則「安好摘要」當心跳(證明 daemon 活著)。
                 # 心跳不是異常,不寫 alert_log(alert_log 保持只記異常)。
