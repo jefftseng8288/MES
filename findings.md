@@ -140,3 +140,21 @@
 
 - **投影「無值列」會逼放寬 Provenance NOT NULL 鐵律——Jeff 定案:不建無值列、保鐵律(2026-07-19 Phase 2,鐵律 vs 效益的權衡)。**
   「從無成功觀測、只有失敗」的 (entity, feature) 若要投影一列(value 全 NULL + current_status),會逼 `source_observation_id` / `observed_at` / `confidence` / `producer` / `selection_rule_version` 五個 NOT NULL 欄(其中 source_observation_id 是 Phase 0 Provenance 鐵律)全部改 nullable——因為這些欄都是「描述當前值」的,無值時無意義。判斷:**放寬鐵律是動到資料層硬約束的大事,不由實作單方決定**——攤開 (A) 不建無值列保鐵律 / (B) 改投影無值列(需一組欄 nullable + gated CHECK)兩個選項給 Jeff。**Jeff 定案 (A):不建無值列。** knowledge_state 只答「當前已知值」,從無 observed 就是**查無此列**;要看「為何沒值 / 試過幾次」去查 observation_log(Append-Only 誠實記著所有失敗)。職責分工:knowledge_state = 當前值,observation_log = 完整歷史含失敗。教訓:遇到「要達成某功能就得鬆一條硬約束」時,**先停下來把選項和代價攤開給人決定,不要為了功能完整度默默鬆綁鐵律。**
+
+- **`generated_at` 用 now() 不違反「投影禁用系統時間」——判準是「這個時間在描述什麼」(2026-07-19 Phase 2.5)。**
+  Phase 2 立過鐵律:投影 knowledge_state 禁用 `now()`/`CURRENT_TIMESTAMP`,時間全由 observation_log 的 observed_at 投影(才能冪等重建)。但 Phase 2.5 的 `insight_store.generated_at` **刻意用執行時間**,這不是破例,是**兩者語義本就不同**:`observed_at` = 「這個**事實**何時被觀測」(歷史事實,錯了就是竄改歷史);`generated_at` = 「這個**描述**何時被產生」(本來就是執行當下,不在描述歷史)。代價是 insight_store **不冪等**(今天重算與明天重算 generated_at 不同)——**已知且接受**:insight 是「每天對當前 Knowledge 重新描述一次」的快照,不是歷史真相的投影;真相在 observation_log,insight 只是描述層。教訓:**「禁用系統時間」不是無差別禁令,判準是「這個時間欄在描述歷史事實,還是描述本次執行」**;前者禁、後者本來就該用。照抄原則而不看語義,會把描述層也做成假的歷史投影。
+
+- **受控清單放 DB CHECK 還是應用層,用「穩不穩定」決定,不是一律下沉(2026-07-19 Phase 2.5)。**
+  MES 既有慣例是受控字串一律 VARCHAR + DB CHECK(entity_type / source / producer / status / confidence),但 `insight_store.value_text`(標籤如 High SKU)**刻意不下沉 DB CHECK**,改用應用層 registry(`src/mes/insight_registry.py`)驗證。理由:**insight 標籤是正在創造、會演化的東西** —— 每加一個標籤就要改 migration,且「受控清單只能往前加、難往後收」(Phase 1-C 踩過:窄化 CHECK 會被既有資料擋住)。對比 `confidence` 是 Phase 0 既定三級、穩定不動 → 同一張表裡它就有 DB CHECK。**判準:「這份清單會不會頻繁改?」會 → 應用層(改一行 Python,不動 schema);不會 → DB CHECK(物理鎖死最強)。** 等 insight 類型穩定後再考慮下沉。**受控本身不打折**(不合法一樣明確報錯、不靜默通過),只是守門的位置換一層。
+
+- **沒有下游行為,就不該設門檻——該記錄原始數值(2026-07-19 Phase 2.5,Jeff 定案)。**
+  GrowthStatProducer 原本要做的是「成長率 → 吐 `Growth` 標籤」,改成**只記錄實際成長率數值、不設門檻**。理由:**門檻是一種判斷,而判斷該由「後面要做什麼行為」決定。** 現階段沒有任何下游行為(Phase 4 才會有),此時設門檻等於**憑空造判斷**,而且**會丟失資訊**——+19% 與 −50% 一旦被壓成同一類「非 Growth」,那個差異就永遠不見了(原始觀測還在,但 Insight 層已經把它抹平)。反過來,先誠實記錄數值,未來要怎麼切由那時的真實行為決定,切法還能改。教訓:**壓縮是有損的,只有當「損掉的部分確定用不到」時才該壓。** 判準:先問「現在有誰要拿這個判斷去做什麼?」沒有答案 → 不要壓,記原值。這也讓 registry 必須支援**數值型** insight_type(驗證「可解析為數值」而非列舉)。
+
+- **Producer 要純函數又需要歷史資料 → 讓它「聲明」需求,由 Engine 統一撈(2026-07-19 Phase 2.5)。**
+  設計定「Producer 是純函數、不自己撈 DB」,但 GrowthStatProducer 需要 30 天歷史 —— 兩個要求看似衝突。解法:**把「要什麼」與「怎麼拿」分離** —— Producer 只用類別屬性**聲明**它需要哪些當前 Facts(`required_features`)與哪些歷史(`required_history`),Engine 依聲明統一撈齊、打包成記憶體 `InsightContext` 再交給它。Producer 的 `produce(ctx)` 唯一參數就是 Context,**碰不到 session** → 純函數、可測試(記憶體造資料即可)、可重現。額外好處:Engine 能把 N 個 Producer 的需求**合併成一次批次查詢**(避免 N+1),而 Producer 完全不需要知道這件事。教訓:**「不准碰 DB」不等於「不能用需要 DB 的資料」——把依賴宣告出來、由外部注入,就同時拿到純度與能力。**
+
+- **producer 欄若不受控,Provider 競技場的計分板會壞掉(2026-07-19 Phase 2.5,補第一批缺口)。**
+  第一批把 insight 的 `producer` 定為「不下沉 DB CHECK」,卻**忘了補應用層守門**,結果它一度是完全自由字串。這比 value_text 更危險:`producer` 是**Provider 競技場的核心欄位**(未來要比較 rule_v1 / stat_v1 / LLM 誰的觀察力強),一旦混入 `rule_v1` / `rule_V1` / `ruleV1` 三種寫法,聚合統計就會把同一個實作者拆成三個,**計分板直接壞掉**(同 source 欄踩過的路)。補法:各 Producer 類別透過 `__init_subclass__` **自己聲明**識別、registry 統一收攏,寫入前 `validate_producer()` 擋未登記者;仍不下沉 DB(演化中)。教訓:**決定「不下沉 DB CHECK」的同時,必須當場把應用層守門補上——否則「受控」只是說說,實際是零管制。** 兩層都不管 = 比明確選擇任一層更糟。
+
+- **對「不該被處理的對象」記 skip,是類別錯誤,會把真訊號埋掉(2026-07-19 Phase 2.5)。**
+  InsightEngine 原本掃所有有 knowledge_state 的 entity,結果一次全量產生 **5918 筆 skip 記錄,其中 2477 筆來自 `store_name_seed`** —— 但 seed 依定義就是「還沒推出 domain 的名字」,**本來就不可能有 product_count**。為它記「無 product_count」不是失敗訊號,是**類別錯誤**(等同於抱怨 review_app entity 沒有商品數)。而執行報告的用途是支撐「要不要繼續觀察**這家店**」的決策,被 80% 的噪音淹沒就等於沒用(一年會累積約 200 萬列無意義記錄)。修法:Engine 只處理 `store` entity → skip 降為 964 筆,**且未損失任何真實產出**。教訓:**「誠實記錄失敗」的前提是「這件事本來該成功」;對本來就不適用的對象記失敗,不是誠實,是雜訊。** 設計失敗記錄時,先界定清楚「誰在這個能力的適用範圍內」。

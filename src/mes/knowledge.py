@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections import defaultdict
 
-from sqlalchemy import delete, select
+from sqlalchemy import Select, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from mes.config import get_settings
@@ -127,6 +128,19 @@ async def rebuild_knowledge_state(session: AsyncSession) -> int:
     return written
 
 
+def _observed_history_stmt(feature: str) -> Select[tuple[ObservationLog]]:
+    """時間序列的**單一定義**:某 feature 的 observed 筆,依 observed_at 排序。
+
+    單筆查詢(feature_history)與批次查詢(feature_history_bulk)共用同一條件,避免兩處
+    各自硬寫而語義漂移(CLAUDE.md 規則 3:取值邏輯收斂單一函式)。
+    """
+    return (
+        select(ObservationLog)
+        .where(ObservationLog.feature == feature, ObservationLog.status == "observed")
+        .order_by(ObservationLog.observed_at, ObservationLog.observation_id)
+    )
+
+
 async def feature_history(
     session: AsyncSession, entity_id: object, feature: str
 ) -> list[ObservationLog]:
@@ -134,16 +148,23 @@ async def feature_history(
 
     knowledge_state = 當前值(查它);時間序列 = 歷史(查此,即 observation_log)。
     """
-    result = await session.execute(
-        select(ObservationLog)
-        .where(
-            ObservationLog.entity_id == entity_id,
-            ObservationLog.feature == feature,
-            ObservationLog.status == "observed",
-        )
-        .order_by(ObservationLog.observed_at, ObservationLog.observation_id)
-    )
+    stmt = _observed_history_stmt(feature).where(ObservationLog.entity_id == entity_id)
+    result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def feature_history_bulk(
+    session: AsyncSession, feature: str
+) -> dict[uuid.UUID, list[ObservationLog]]:
+    """同 feature_history,但一次撈全部 entity(批次投影/Insight 用,避免 N+1 查詢)。
+
+    回傳 entity_id -> 依 observed_at 排序的 observed 歷史。
+    """
+    rows = (await session.execute(_observed_history_stmt(feature))).scalars().all()
+    grouped: dict[uuid.UUID, list[ObservationLog]] = defaultdict(list)
+    for o in rows:
+        grouped[o.entity_id].append(o)
+    return grouped
 
 
 async def run_projection(

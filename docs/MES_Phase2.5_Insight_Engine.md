@@ -46,6 +46,17 @@
     insight 標籤是正在創造、會演化的東西,適合先應用層。**用「穩不穩定/會不會頻繁改」決定受控放 DB 還是應用層。**
   - 等 insight 類型穩定後,再考慮下沉 DB CHECK。
 
+### 實作落地補充(2026-07-19 第一批,`insight_store` 表已建;migration `aa0151f18e2d`)
+
+- **`(entity_id, insight_type)` UNIQUE 約束(Jeff 定案,設計文件原無):** 與 knowledge_state 的 `(entity_id, feature)` 主鍵**同構** —— 一個 entity 的每個 insight 維度只有一個當前值。效果:第二批的全量重算走**依此鍵 upsert**(而非清空重寫)→ **`insight_id` 穩定不會每天重生成**,未來 Phase 3 的 Hypothesis 才引用得住(清空重寫會讓引用斷掉)。
+- **★ `generated_at` 用 `now()`(執行時間),這不違反 Phase 2 的「投影禁用系統時間」——兩者語義不同:**
+  - knowledge_state 的 `observed_at` = 「這個**事實**何時被觀測」→ 是歷史事實,必須由 observation_log 的 observed_at 投影而來,**禁用系統時間**。
+  - insight_store 的 `generated_at` = 「這個**描述**何時被產生」→ 本來就是執行時間,不是在描述歷史事實。
+  - **已知且接受的代價:** insight_store **不是**冪等重建的(今天重算與明天重算 generated_at 不同)。可接受 —— insight 本來就是「每天對當前 Knowledge 重新描述一次」的快照,不是「歷史真相的投影」;真相在 observation_log,insight 只是描述層。
+- **CHECK 落點(刻意不一致,依「穩不穩定」判準):** `confidence` 沿用 Phase 0 既定三級(穩定)→ **有 DB CHECK**;`insight_type` / `value_text` / `producer`(演化中)→ **無 DB CHECK**,受控放應用層 `src/mes/insight_registry.py`。
+- **`producer` 不與 observation 的 `PRODUCERS` 共用受控清單:** insight 的產生者(`rule_v1` / `stat_v1`)與 observation 的產生者(`mes_crawler_v1` / `duckduckgo_v1` …)是**兩套不同語彙**,不混進同一個 CHECK;且 insight producer 會隨新 Producer 增加而演化,故同樣不下沉 DB。
+- **`entity_id` 加 FK → `entity.entity_id`**(沿用 knowledge_state 慣例)。
+
 ### source_knowledge_refs(Provenance,定案:記 (entity_id, feature))
 - NOT NULL JSONB,記這個 insight 基於哪幾條 knowledge 事實 —— 一組 `(entity_id, feature)`。
 - **第一版記 (entity_id, feature) 即可**,不追求「完全重現當時的確切值」。
@@ -68,6 +79,35 @@
   4. InsightEngine 把這批吐出的 insight 批次寫入(upsert)insight_store。
 - **好處:** 實作者是純函數(給定 Facts → 吐 Insight),可測試、可重現;加新實作者只需加一個類別丟進 List(可插拔)。
 - 呼應 Roadmap「實作者可插拔」+ Phase 2 的純函數精神。
+
+---
+
+### 實作落地補充(2026-07-19 第二批,`src/mes/insight.py` + `insight_producers.py`)
+
+- **GROWTH_VELOCITY 改為「數值型、刻意不設門檻」(Jeff 定案,原設計文件寫的是吐出 `Growth` 標籤):** 不判斷「多少算 Growth」,只記錄實際成長率數值。**理由:門檻是一種判斷,判斷該由「後面要做什麼行為」決定。** 現階段沒有任何下游行為,設門檻等於憑空造判斷,還會丟失資訊(+19% 與 −50% 被壓成同一類「Growth」,差異永遠不見)。Phase 4 要怎麼切,由那時的實際行為決定。故 registry 擴充為支援兩種 insight_type:**列舉型**(SKU_SCALE)與**數值型**(GROWTH_VELOCITY,驗證「可解析為數值」而非列舉)。
+- **SKU_SCALE 門檻(Jeff 定案,連續無縫不留空隙):** `≤100` Low SKU / `101–500` Medium SKU / `>500` High SKU。confidence 誠實沿用來源事實的信心度(事實若 estimated,標籤不自稱 certain)。
+- **成長率算法:** 用 Phase 2 的時間序列取 `review_count` 的 observed 歷史;「30 天前的值」取**最接近 30 天前**的那筆,**容忍窗 25–35 天**(含端點),窗內找不到 → 不產出並記錄跨度。成長率 =(當前 − 30天前)/ 30天前;分母 ≤0 → 不產出並記錄基準值。value_text 格式統一為**比率、小數 6 位**(如 `"0.250000"` = +25%,`"-0.500000"` = −50%)。因窗有容忍(未必剛好 30 天)→ confidence 記 `estimated`。
+- **★ Producer 純函數但需歷史 → 由 Engine 統一撈:** Producer 只**聲明**它需要什麼(`required_features` / `required_history`),Engine 撈齊打包成記憶體 `InsightContext` 交給它;Producer 拿到的永遠是記憶體物件、**不碰 DB** → 純函數、可測試、可重現。`produce(ctx)` 的唯一參數就是 Context(測試有守門)。
+- **producer 欄補上應用層受控(第一批的缺口):** producer 是 Provider 競技場的核心欄位(未來比較 rule_v1 / stat_v1 / LLM 的觀察力),寫法不一致(rule_v1 / rule_V1 / ruleV1)= 計分板壞掉。各 Producer 類別透過 `__init_subclass__` **自己聲明**、registry 統一收攏;寫入前 `validate_producer()` 守門。仍**不下沉 DB CHECK**(理由同 value_text:還在演化)。
+- **加新 Producer = 加一個類別丟進 `DEFAULT_PRODUCERS`**,不動 Engine(連 registry 登記都自動)。
+- **★ Engine 只處理 `store` entity(實作決定,需 Jeff 確認):** Insight 描述的是市場實體的狀態;`store_name_seed`(尚未推出 domain 的名字)依定義沒有任何市場特徵,為它記「無 product_count」不是失敗訊號而是**類別錯誤**,且量體會把 run log 的真訊號埋掉(實測:不篩時一次全量 5918 筆 skip 中 2477 筆來自 seed;篩後降為 964 筆且**未損失任何真實產出**)。
+
+### 執行報告表 `insight_run_log`(定案:記錄「為什麼沒產出」)
+
+「查無此列」會靜默掉三種完全不同的情況 ——(a) 資料不足算不出、(b) 算得出但無此描述、(c) 根本沒處理到這家店。分不出來 = 失敗訊號被偽裝成沒事。**但不塞進 insight_store**(value_text NOT NULL;塞「資料不足」會把「系統的計算狀態」混進「市場描述」,污染語義)→ 獨立記錄,比照 `alert_log` 精神。
+
+| 欄位 | 型別 | 說明 |
+|---|---|---|
+| `run_log_id` | UUID PK | |
+| `run_at` | TIMESTAMPTZ NOT NULL | 同一次全量重算共用,可據此聚合「某次執行」 |
+| `entity_id` | UUID NOT NULL (FK) | 哪個 entity |
+| `insight_type` / `producer` | VARCHAR NOT NULL | 哪個維度 / 哪個實作者 |
+| `reason` | TEXT NOT NULL | **具體載明缺什麼**(人讀) |
+| `detail` | JSONB | 結構化細節,供聚合(如 `{"history_points": 1, "span_days": 12}`) |
+
+實際原因範例(非「資料不足」這種無資訊字串):`review_count 僅 1 筆 observed(需當前 + 約 30 天前兩點)`、`觀測跨度僅 12 天,25–35 天窗內無 observed`、`knowledge 無 product_count 值(該 entity 未曾成功觀測到商品數)`。**累積不刪**(未來要判斷「還要不要繼續觀察這家店」需要歷史)。
+
+**界線:** 本表**只做記錄**。「什麼時候停止觀察某家店」的決策機制**不在 Phase 2.5 做** —— 那要基於這些記錄累積後才能定,且牽涉 harvest 排程策略。
 
 ---
 

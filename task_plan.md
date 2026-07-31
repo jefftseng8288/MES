@@ -264,7 +264,7 @@
 
 ## Phase 2.5 — Insight Engine(資訊降維 / 語義壓縮)
 
-**狀態:** 未開始
+**狀態:** ✅ 能力達成(第一批 insight_store + registry、第二批 InsightEngine / 兩個 Producer / 執行報告表 / 23:40 排程皆完成,2026-07-19)
 
 **目的:** 把 Knowledge 濃縮成「描述看到了什麼」的 Insight。這是 **Describe**,不是 Predict。
 
@@ -282,39 +282,53 @@
 
 **實作層工作項(依設計文件補;分批建議:A = 第一批,B/C = 第二批):**
 
-*A. Insight 資料模型 —— 新表 `insight_store`(完全獨立於 knowledge_state,絕不混)*
+*A. Insight 資料模型 —— 新表 `insight_store`(完全獨立於 knowledge_state,絕不混)* — ✅ 第一批完成(2026-07-19,migration `aa0151f18e2d`)
 
-- [ ] 新表 `insight_store`:`insight_id`(UUID PK)/ `entity_id`(NOT NULL)/ `insight_type`(VARCHAR(50) NOT NULL,如 `SKU_SCALE` / `GROWTH_VELOCITY`)/ `value_text`(VARCHAR(255) NOT NULL,標籤如 `High SKU`)/ `producer`(VARCHAR(50) NOT NULL,如 `rule_v1` / `stat_v1`)/ `confidence`(VARCHAR(20) NOT NULL,沿用既有離散三級)/ `generated_at`(TIMESTAMPTZ NOT NULL)/ `source_knowledge_refs`(JSONB NOT NULL)
-- [ ] 一對多 + 一 entity 可多列(一家店可同時 High SKU + Growth,每 insight 一列);主鍵用 insight_id,不是 (entity_id, feature)
-- [ ] **value_text 受控,但第一版用「應用層驗證 + 集中定義」,不下沉 DB CHECK** —— 理由:insight_type / 標籤還在快速演化,DB 硬鎖太早(每加標籤改 migration,且受控清單只能往前加、難往後收,Phase 1-C 踩過)。做法:每個 insight_type 的合法 value 集合集中定義一處(registry 或 Producer 自聲明),InsightEngine 寫入前驗證。判準:**用「穩不穩定 / 會不會頻繁改」決定受控放 DB 還是應用層**;穩定既定事實(如 knowledge 的 currency)適合 DB CHECK,演化中的 insight 標籤先應用層,等穩定再考慮下沉
-- [ ] `source_knowledge_refs`(Provenance):記一組 `(entity_id, feature)` 即可,**第一版不追求完全重現當時的確切值**(insight 有 generated_at、每天全量重算,精確重現非必要需求)。精神同 observation_log 的 source_observation_id:讓 insight 可追溯
+- [x] 新表 `insight_store`:`insight_id`(UUID PK)/ `entity_id`(NOT NULL,FK → entity)/ `insight_type`(VARCHAR(50) NOT NULL,如 `SKU_SCALE` / `GROWTH_VELOCITY`)/ `value_text`(VARCHAR(255) NOT NULL,標籤如 `High SKU`)/ `producer`(VARCHAR(50) NOT NULL,如 `rule_v1` / `stat_v1`)/ `confidence`(VARCHAR(20) NOT NULL,沿用既有離散三級 + DB CHECK)/ `generated_at`(TIMESTAMPTZ NOT NULL)/ `source_knowledge_refs`(JSONB NOT NULL)
+- [x] 一對多 + 一 entity 可多列(一家店可同時 High SKU + Growth,每 insight 一列);主鍵用 insight_id,不是 (entity_id, feature)
+- [x] **`(entity_id, insight_type)` UNIQUE 約束(Jeff 定案):** 與 knowledge_state 的 (entity_id, feature) 主鍵同構 —— 一 entity 的每個 insight 維度只有一個當前值。第二批全量重算走**依此鍵 upsert**(非清空重寫)→ `insight_id` 穩定不每天重生成,Phase 3 的 Hypothesis 才引用得住
+- [x] **`generated_at` 用 `now()`(執行時間),不違反 Phase 2 禁用系統時間 —— 語義不同:** knowledge_state 的 `observed_at` = 「這個**事實**何時被觀測」(歷史事實,必由 observation_log 投影);insight_store 的 `generated_at` = 「這個**描述**何時被產生」(本來就是執行時間)。已知且接受:insight_store **不是**冪等重建的(真相在 observation_log,insight 只是每天重新描述一次的快照)
+- [x] **value_text 受控,第一版用「應用層驗證 + 集中定義」,不下沉 DB CHECK** —— 理由:insight_type / 標籤還在快速演化,DB 硬鎖太早(每加標籤改 migration,且受控清單只能往前加、難往後收,Phase 1-C 踩過)。判準:**用「穩不穩定 / 會不會頻繁改」決定受控放 DB 還是應用層**。落地:`src/mes/insight_registry.py`(registry + `validate_insight_value()` 守門,不合法明確報錯);`insight_type` / `value_text` / `producer` 皆無 DB CHECK,`confidence`(Phase 0 既定、穩定)有 DB CHECK
+- [x] registry 設計成「第二批 Producer 可登記進來」的形狀(`register_insight_type()`;同維度不同值集合 → 擋);**第一批只建機制不填內容**,只留設計文件明載的 `SKU_SCALE` 一個示範登記
+- [x] `source_knowledge_refs`(Provenance):記一組 `(entity_id, feature)` 即可,**第一版不追求完全重現當時的確切值**(insight 有 generated_at、每天全量重算,精確重現非必要需求)。精神同 observation_log 的 source_observation_id:讓 insight 可追溯
 
-*B. 架構 —— Pipeline Plugins(常駐 Orchestrator 定時批次調用)*
+*B. 架構 —— Pipeline Plugins(常駐 Orchestrator 定時批次調用)* — ✅ 第二批完成(2026-07-19)
 
-- [ ] `InsightEngine` 管線 + `BaseInsightProducer` 基底類別;**實作者 = 純函數類別,不自己撈 DB**(可測試、可重現)
-- [ ] InsightEngine 把某 entity 在 knowledge_state 的所有 Facts 打包成記憶體 Context Dict → 丟給可插拔的實作者 List → 各實作者平行掃描這份字典吐出 insight 結構
-- [ ] 頭兩個實作者:`SKURuleProducer`(product_count > 500 → High SKU)、`GrowthStatProducer`(呼叫 Phase 2 時間序列查詢算最近 30 天 review 成長率 → Growth)
-- [ ] InsightEngine 把這批吐出的 insight 批次 upsert 寫入 insight_store;加新實作者只需加一個類別丟進 List(可插拔)
+- [x] `InsightEngine`(`src/mes/insight.py`)+ `BaseInsightProducer`(`insight_producers.py`);**實作者 = 純函數類別,不自己撈 DB**
+- [x] **Producer 純函數但需歷史 → 由 Engine 統一撈:** Producer 只**聲明**需要什麼(`required_features` / `required_history`),Engine 撈齊打包成記憶體 `InsightContext`;Producer 只看記憶體物件、不碰 DB(`produce(ctx)` 唯一參數就是 Context)
+- [x] 頭兩個實作者:`SKURuleProducer`(≤100 Low / 101–500 Medium / >500 High,連續無縫)、`GrowthStatProducer`(用 Phase 2 時間序列算 30 天成長率,**數值型、刻意不設門檻**)
+- [x] **registry 擴充:列舉型 + 數值型兩種 insight_type**;`validate_insight_value()` 依種類分派,未登記一律擋
+- [x] **producer 欄補上應用層受控**(第一批缺口):各 Producer 類別透過 `__init_subclass__` 自己聲明、registry 統一收攏,寫入前 `validate_producer()` 守門;仍不下沉 DB CHECK
+- [x] 批次 **upsert** 依 `(entity_id, insight_type)` → **insight_id 穩定不重生成**(Phase 3 引用得住);加新 Producer 只需加一個類別丟進 `DEFAULT_PRODUCERS`,不動 Engine(連 registry 登記都自動)
+- [x] **執行報告表 `insight_run_log`**(migration `7c7cff956f83`):記錄「某 entity 的某 insight_type **為什麼沒產出**」,原因具體載明缺什麼 + JSONB 結構化細節;不塞進 insight_store(避免把系統計算狀態混進市場描述)。**只做記錄,停止觀察的決策機制不在 Phase 2.5 做**
+- [x] **Engine 只處理 `store` entity**(實作決定,待 Jeff 確認):seed / review_app 依定義無市場特徵,為其記 skip 是類別錯誤且會埋掉真訊號(實測 5918 → 964 筆,未損失任何真實產出)
 
-*C. 排程 —— 每天 23:40 台灣獨立 daemon 全量重算*
+*C. 排程 —— 每天 23:40 台灣獨立 daemon 全量重算* — ✅ 完成
 
-- [ ] 獨立 daemon(沿用既有 launchd 掛法,**獨立於 harvest / alarm / projection**),每天 23:40 台灣全量重算(第一版全量,沿用 Phase 2 精神:資料量小、全量快、天然冪等)
-- [ ] 每日處理鏈:Knowledge 投影(23:30)→ Insight 壓縮(23:40)→ 警鈴(23:50)
+- [x] 獨立 daemon `deploy/com.mes.insight.plist`(launchd one-shot,**獨立於 harvest / alarm / projection**),每天 23:40 台灣全量重算
+- [x] 每日處理鏈:Knowledge 投影(23:30)→ Insight 壓縮(23:40)→ 警鈴(23:50)
 
-*D. 描述 vs 預測界線(實作紅線,寫進實作紀律)*
+*D. 描述 vs 預測界線(實作紅線,寫進實作紀律)* — ✅ 判準落地(borderline 的 Highly Dependent Producer 尚未實作,非本批範圍)
 
-- [ ] **紅線判準(可操作):** 只要出現「下個月 / 即將 / 應該會」等隱含未來時間軸 + 帶賭注性質的推論 → 是預測 → **立即停修**(屬 Phase 3 Hypothesis)
+- [x] **紅線判準(可操作):** 只要出現「下個月 / 即將 / 應該會」等隱含未來時間軸 + 帶賭注性質的推論 → 是預測 → **立即停修**(屬 Phase 3 Hypothesis)。已寫進 `insight_producers.py` / `insight.py` 模組 docstring 作為實作紀律;測試 `test_no_prediction_columns_in_insight_store` 守門
 - [ ] **borderline:** `Highly Dependent`(如連續半年 uses_review_app='loox')**可作 Insight**(對歷史流水帳的描述壓縮);但引申「因為依賴,所以短期內不會換 App」= 預測 → **砍**。關鍵:同一事實,描述它是 Insight、從它引申未來是 Hypothesis
 
 ### ✅ 驗收(Acceptance)
 
-**狀態:** ⬜ 未驗收(Phase 尚未開始)
+**狀態:** ✅ 能力達成(2026-07-19,第二批完成;143 測試全過。真實資料實跑:758 家 store → 548 筆 SKU_SCALE)
 
-**驗收條件(能力導向):**
-- [ ] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者(producer)與來源(source_knowledge_refs)
-- [ ] Insight 中沒有混入任何預測
-- [ ] value_text 受控一致(同一 insight_type 不同實作者不會吐出不一致寫法,如 High SKU / high_sku / HIGH)
-- [ ] source_knowledge_refs 記錄該 insight 基於哪幾條 (entity_id, feature) 事實(可追溯)
+**驗收條件(能力導向)—— 逐條對照實際測試:**
+- [x] 純 Rule + Statistics 能對一批店穩定產出結構化 Insight,每個帶產生者(producer)與來源(source_knowledge_refs)—— 真實資料 548 筆 SKU_SCALE(547 Low / 1 Medium),每筆帶 `rule_v1` + refs
+- [x] Insight 中沒有混入任何預測 —— `test_no_prediction_columns_in_insight_store`;Producer 只做當前事實/歷史的描述壓縮
+- [x] value_text 受控一致 —— 列舉型擋 `high_sku`/`HIGH SKU`;數值型擋非數值(`test_numeric_type_accepts_numbers_rejects_labels`)
+- [x] source_knowledge_refs 記錄基於哪幾條 (entity_id, feature) 事實 —— 真實資料與測試皆驗證
+- [x] **producer 受控** —— `rule_V1` / `ruleV1` 等未登記寫法被擋(`test_producer_controlled`)
+- [x] **upsert 穩定** —— 連跑兩次不重複建列、`insight_id` 不變(`test_engine_produces_and_upserts_stably`)
+- [x] **Producer 純函數** —— 同一 Context 輸出恆定、`produce` 不收 session(`test_producers_are_pure_*`)
+- [x] **可插拔** —— 新增假 Producer 丟進 List 即生效,不動 Engine(`test_engine_pluggable_new_producer`)
+- [x] **未產出有具體原因可查** —— `insight_run_log` 載明缺什麼(如「僅 1 筆 observed」「跨度僅 12 天」)
+
+> **⚠️ GROWTH_VELOCITY 對真實資料尚無產出(非 bug,但原因與預期不同):** `review_count` **不是 MES 目前採集的 feature**(不在 Feature Taxonomy v1 的 9 個市場特徵內、Phase 1-D 沒抓),真實觀測數為 **0** —— 故不是「資料跨度不足 30 天」,而是**該 feature 從未被採集**。能力已用造的測試資料完整驗證(成長率計算、25–35 天容忍窗邊界、資料不足各分支)。要讓它對真實資料生效,需先把 `review_count` 納入採集範圍(屬 Feature Taxonomy / Phase 1-D 範疇,待 Jeff 定)。
 
 **停止條件:** Insight 裡開始夾帶預測/賭注 → 停(Describe 與 Predict 混了)。
 

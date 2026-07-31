@@ -341,3 +341,81 @@ class AlertLog(Base):
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     # Telegram 是否送達(留 credential 空時為 False)。
     delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+class InsightStore(Base):
+    """Phase 2.5 — 對 Knowledge Facts 做「標籤化 / 語義壓縮」的結果。
+
+    **完全獨立於 knowledge_state,絕不混:** knowledge_state = 中立事實(product_count=520);
+    insight_store = 對事實的描述性標籤(→ High SKU)。一個 entity 可多列(每個 insight_type
+    一列,如同時 SKU_SCALE + GROWTH_VELOCITY)。
+
+    **這是 Describe,不是 Predict。** 出現「下個月 / 即將 / 應該會」等未來時間軸 + 賭注
+    → 那是 Hypothesis(Phase 3),不屬本層。
+    """
+
+    __tablename__ = "insight_store"
+    __table_args__ = (
+        # 與 knowledge_state 的 (entity_id, feature) 主鍵同構:一個 entity 的每個 insight
+        # 維度只有一個當前值。第二批全量重算走此鍵 upsert(不清空重寫)→ insight_id 穩定,
+        # 未來 Phase 3 的 Hypothesis 才引用得住。
+        UniqueConstraint("entity_id", "insight_type", name="uq_insight_entity_type"),
+        CheckConstraint(_sql_in("confidence", CONFIDENCE_LEVELS), name="ck_insight_confidence"),
+    )
+
+    insight_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entity.entity_id"), nullable=False
+    )
+    # insight_type / value_text / producer 刻意**不** CHECK 鎖 —— 見 mes.insight_registry:
+    # insight 標籤還在快速演化,受控放應用層(registry + 寫入前驗證),等穩定再考慮下沉 DB。
+    # 對比 confidence(Phase 0 既定三級、穩定)→ 適合 DB CHECK,故上面有鎖。
+    insight_type: Mapped[str] = mapped_column(String(50), nullable=False)  # 如 SKU_SCALE
+    value_text: Mapped[str] = mapped_column(String(255), nullable=False)  # 如 High SKU(應用層受控)
+    producer: Mapped[str] = mapped_column(String(50), nullable=False)  # 如 rule_v1 / stat_v1
+    confidence: Mapped[str] = mapped_column(String(20), nullable=False)
+    # ★ generated_at = 「這個**描述**何時被產生」= 實際執行時間(now()),與 knowledge_state 的
+    # observed_at(「這個**事實**何時被觀測」,必由 observation_log 投影、禁用系統時間)語義不同。
+    # 已知且接受的代價:insight_store **不是**冪等重建的(今天重算與明天重算 generated_at 不同)。
+    # 可接受 —— insight 是「每天對當前 Knowledge 重新描述一次」的快照,不是歷史真相的投影;
+    # 真相在 observation_log,insight 只是描述層。**這不違反 Phase 2 的純函數原則。**
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    # Provenance:此 insight 基於哪幾條 knowledge 事實 —— 一組 (entity_id, feature)。
+    # 第一版不追求「完全重現當時的確切值」(有 generated_at 且每天重算,精確重現非必要需求)。
+    source_knowledge_refs: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+
+
+class InsightRunLog(Base):
+    """Phase 2.5 — 每次全量重算時,記錄「某 entity 的某 insight_type **為什麼沒產出**」。
+
+    **為什麼要有:** insight_store「查無此列」會靜默掉三種完全不同的情況 ——
+    (a) 資料不足算不出、(b) 算得出但無此描述、(c) 根本沒處理到這家店。
+    分不出來 = 失敗訊號被偽裝成沒事,違反「失敗不偽裝」鐵律。
+
+    **為什麼不塞進 insight_store:** value_text NOT NULL,塞「資料不足」會把「系統的計算狀態」
+    混進「市場描述」,污染語義(同 observation_log 不把 fetch_failed 記成 0)。故獨立記錄,
+    比照 `alert_log` 的精神:結構化、可查詢、可聚合。
+
+    `reason` 要**足夠具體、載明缺什麼**(例:「review_count 僅 1 筆 observed」、
+    「觀測跨度僅 12 天,25–35 天窗內無 observed」),才能支撐未來「要不要繼續觀察這家店」
+    的決策。**本表只做記錄;停止觀察的決策機制不在 Phase 2.5 做。**
+    """
+
+    __tablename__ = "insight_run_log"
+
+    run_log_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 同一次全量重算的所有列共用同一個 run_at(可據此聚合「某次執行」)。
+    run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now)
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("entity.entity_id"), nullable=False
+    )
+    insight_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    producer: Mapped[str] = mapped_column(String(50), nullable=False)
+    # 人讀的具體原因(載明缺什麼),不是「資料不足」這種無資訊的字串。
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    # 機器讀的結構化細節(如 {"history_points": 1, "span_days": 12}),供聚合分析。
+    detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
