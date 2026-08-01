@@ -6,6 +6,32 @@
 
 ---
 
+## 2026-08-02 — misfire:框架預設值吃掉三個批次
+
+**查證起點:** 8/1 21:00 那批 observed=0 且無心跳,但 daemon 今早才重啟過、應該跑新 code。
+
+**判定:第 4 種(其他)—— 不是 Lock 死鎖、不是程序掛掉、不是心跳寫入失敗。**
+
+`APScheduler.misfire_grace_time` **預設只有 1 秒**,事件迴圈卡超過 1 秒該次任務就被**整個丟棄**。err log 的三行 `was missed by ~2s` 與缺失的三個心跳**完全對上**(`next run at` 指的是被跳過那次的下一次):12:00 harvest、21:00 baseline、21:00 harvest。
+
+排除的可能:PID `62381` 24 小時未變(沒掛過)、`pmset` 無任何 Sleep/Wake、err log 無 Traceback、Lock 用 `async with` 保證釋放且 8/2 02:00 正常跑完。
+
+**更早的證據:err log 顯示 7/24 就有 `missed by 1.22s`** —— 這個系統一直在用「卡頓超過 1 秒就丟掉整批」的設定跑,只是沒人看 err log。
+
+### 修復(三件)
+
+1. **`MISFIRE_GRACE_SECONDS = 3600`** + 保留 `coalesce=True`。理由(Jeff):batch_id 依 slot 固定,晚跑的批次仍是「那一批」,補跑沒壞處;而批次消失是實實在在的損失。**寧可晚跑,不要不跑。**
+2. **新增第四種診斷分支** —— 但做成**結構化訊號**而非解析 log:接 APScheduler 的 `EVENT_JOB_MISSED` 事件寫進 `job_run_log`(`status='missed'`)。診斷會說「被排程丟棄,**不是 daemon 死了也不是 code 有問題**,方向是調 misfire_grace_time」。**關鍵細節:`missed` 不算「有跑」**(`RAN_STATUSES` 只認 success/failed),否則會把「沒跑」的警鈴餵飽而弄瞎它。
+3. **`code_version` 加 `-dirty`** —— 就在今天重啟時真實發生:daemon 跑著含未 commit 改動的 code,hash 卻標成乾淨的 `b7ea865`。改用 `git describe --always --dirty`。**版本標記的價值全在邊緣情況;完美狀態下人人都誠實。**
+
+**daemon 已重啟兩次**(07:05 載入 misfire 修正;commit 後再一次讓 hash 對齊)。四個 job 已驗證 `misfire_grace=3600s`。
+
+**未動:** 阻塞式 `time.sleep()` 在 asyncio 事件迴圈裡(5 處)—— 真地雷(baseline 一批阻塞 52 分鐘,若跑滿 5 小時煞車會吃掉期間所有 harvest 批次),但牽動較廣,另開一批。
+
+測試 201 passed;ruff / mypy 綠。
+
+---
+
 ## 2026-08-01 — 晨間查證:抓到第五種靜默失效(跑的不是最新 code)
 
 > 昨晚警鈴報了四條。三條判定完畢,一條是真異常 —— 而查下去發現的東西,

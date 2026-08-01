@@ -18,11 +18,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from zoneinfo import ZoneInfo
 
+from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from mes.harvest import run_store_harvest_batch
+from mes.jobs import JOB_BASELINE, JOB_HARVEST, record_missed
 from mes.pipeline import run_daily_batch
 
 logger = logging.getLogger(__name__)
@@ -45,6 +48,18 @@ SCHEDULED_SLOTS = {2: 1, 10: 2, 21: 3}  # baseline (DDG): 02:00 -> 01, 10:00 -> 
 # (products.json + homepage) — a different target from DDG, independent rate-limiting.
 # Every 3h in Taiwan time (00/03/06/09/12/15/18/21) ≈ 8 batches/day × 1–3 stores.
 STORE_HARVEST_HOURS = "*/3"
+
+# ★ misfire 寬限(2026-08-02 定案)。APScheduler 預設只有 **1 秒** —— 事件迴圈卡超過 1 秒,
+# 該次任務就被**整個丟棄**(不是延後,是跳過),只在 stderr 留一行字。實測 8/1 因為約 2 秒
+# 的停頓,12:00 harvest、21:00 baseline、21:00 harvest **三批直接消失**。
+#
+# 設大值 + coalesce=True:寧可晚跑,不要不跑。對 baseline 補跑沒有壞處 —— batch_id 依 slot
+# 固定(-01/-02/-03),晚跑的批次仍是「那一批」;而「批次消失」是實實在在的損失。
+MISFIRE_GRACE_SECONDS = 3600
+
+# APScheduler 的 job id -> MES 的鏈路名稱(misfire 記錄用)。
+_JOB_ID_TO_CHAIN = {f"harvest_slot_{s}": JOB_BASELINE for s in SCHEDULED_SLOTS.values()}
+_JOB_ID_TO_CHAIN["store_harvest"] = JOB_HARVEST
 
 
 # ★ 跨 slot 互斥鎖(2026-07-31)。
@@ -76,6 +91,31 @@ async def _store_harvest_job() -> None:
     await run_store_harvest_batch()
 
 
+def _on_job_missed(event: JobExecutionEvent) -> None:
+    """★ 把「被排程丟棄」記成結構化訊號(而非只留在 stderr 的一行字)。
+
+    沒有這個,警鈴只看得到「沒有心跳」,診斷會說「daemon 沒跑 / 報錯 / 沒 load」——
+    但真相是第四種:**排程丟棄了它**,修法是調 misfire_grace_time,不是去救 daemon。
+    """
+    chain = _JOB_ID_TO_CHAIN.get(event.job_id)
+    if chain is None:
+        return
+    detail: dict[str, object] = {"job_id": event.job_id}
+    # baseline 的 slot 可還原成該批的 batch_id,讓警鈴能對到「哪一批被丟棄」。
+    if chain == JOB_BASELINE and event.job_id.startswith("harvest_slot_"):
+        slot = int(event.job_id.rsplit("_", 1)[1])
+        day = event.scheduled_run_time.astimezone(ZoneInfo(HARVEST_TZ)).date().isoformat()
+        detail["slot"] = slot
+        detail["batch_id"] = f"{day}-{slot:02d}"
+    logger.warning("[schedule] %s 的排程被丟棄(misfire):%s", chain, detail)
+    try:
+        asyncio.get_running_loop().create_task(
+            record_missed(chain, event.scheduled_run_time, detail)
+        )
+    except RuntimeError:  # 沒有執行中的 loop(理論上不會發生於 AsyncIOScheduler)
+        logger.exception("[schedule] 無法記錄 misfire(無執行中的 event loop)")
+
+
 def build_scheduler() -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone=HARVEST_TZ)
     for hour, slot in SCHEDULED_SLOTS.items():
@@ -86,6 +126,7 @@ def build_scheduler() -> AsyncIOScheduler:
             args=[slot],
             max_instances=1,  # never overlap the same slot
             coalesce=True,  # if we missed a fire, run once, not N times
+            misfire_grace_time=MISFIRE_GRACE_SECONDS,
         )
     scheduler.add_job(
         _store_harvest_job,
@@ -93,7 +134,10 @@ def build_scheduler() -> AsyncIOScheduler:
         id="store_harvest",
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=MISFIRE_GRACE_SECONDS,
     )
+    # 就算有寬限窗,仍可能被丟棄(卡超過一小時)-> 把它記成結構化訊號,不要只留在 stderr。
+    scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
     return scheduler
 
 

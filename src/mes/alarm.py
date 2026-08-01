@@ -31,6 +31,8 @@ from mes.jobs import (
     JOB_HARVEST,
     JOB_INSIGHT,
     JOB_PROJECTION,
+    RAN_STATUSES,
+    STATUS_MISSED,
 )
 from mes.notify import send_telegram
 
@@ -148,7 +150,31 @@ async def load_baseline_batch_beats(
     return beats
 
 
-def _diagnose_zero_observed(b: BatchStats, beat_summary: dict[str, Any] | None = None) -> str:
+async def load_missed_baseline_batches(
+    session: AsyncSession, taiwan_date: str
+) -> set[str]:
+    """當天被排程丟棄(misfire)的 baseline batch_id 集合。
+
+    這是「沒有心跳」的**第四種原因**:不是 daemon 死了/沒 load/報錯,而是**排程丟棄了它**。
+    修法完全不同(調 misfire_grace_time,不是去救 daemon),故必須分開診斷。
+    """
+    rows = (
+        await session.execute(
+            select(JobRunLog).where(
+                JobRunLog.job == JOB_BASELINE, JobRunLog.status == STATUS_MISSED,
+                func.to_char(func.timezone("Asia/Taipei", JobRunLog.started_at), "YYYY-MM-DD")
+                == taiwan_date,
+            )
+        )
+    ).scalars().all()
+    return {str(b) for r in rows if (b := (r.summary or {}).get("batch_id"))}
+
+
+def _diagnose_zero_observed(
+    b: BatchStats,
+    beat_summary: dict[str, Any] | None = None,
+    was_missed: bool = False,
+) -> str:
     """0 observed 的原因分辨(對應完全不同的調整方向)。
 
     ★ **先讀心跳,再看 observation_log。** 因為「沒跑」與「跑了但一個新 Seed 都沒撈到」
@@ -158,6 +184,14 @@ def _diagnose_zero_observed(b: BatchStats, beat_summary: dict[str, Any] | None =
 
     `beat_summary` = 該批號對應的 baseline 心跳 summary;None 表示查無心跳。
     """
+    if was_missed:
+        # ★ 第四種原因:排程把它丟棄了(APScheduler misfire),根本沒執行。
+        # daemon 是活的、code 是好的 —— 去救 daemon 是白費工,要調的是 misfire_grace_time。
+        return (
+            "⏱️ **該批被排程丟棄(APScheduler misfire)** → 根本沒執行,"
+            "**不是 daemon 死了、也不是 code 有問題** —— 事件迴圈卡住超過 misfire 寬限窗,"
+            "該次任務被整個跳過。方向:調 misfire_grace_time / 查是什麼卡住迴圈"
+        )
     if beat_summary is not None:
         # 有心跳 = daemon 確實跑了 -> 排除「執行異常」,往供給/限流方向診斷。
         gathered = int(beat_summary.get("actual", 0))
@@ -187,7 +221,9 @@ def _diagnose_zero_observed(b: BatchStats, beat_summary: dict[str, Any] | None =
 
 
 def evaluate(
-    batches: list[BatchStats], batch_beats: dict[str, dict[str, Any]] | None = None
+    batches: list[BatchStats],
+    batch_beats: dict[str, dict[str, Any]] | None = None,
+    missed_batches: set[str] | None = None,
 ) -> list[Alert]:
     """三警鈴巡檢。回傳觸發的 Alert(可多個,合併推送)。
 
@@ -195,6 +231,7 @@ def evaluate(
     給了才能分辨「沒跑」vs「跑了但撈到 0」;不給則退回舊行為(僅看 observation_log)。
     """
     batch_beats = batch_beats or {}
+    missed_batches = missed_batches or set()
     day_snapshot = [b.as_dict() for b in batches]
     thresholds = {
         "supply_low": SUPPLY_LOW_THRESHOLD, "fetch_failed_high": FETCH_FAILED_HIGH_THRESHOLD,
@@ -207,7 +244,9 @@ def evaluate(
             alerts.append(Alert(
                 ALERT_ZERO_OBSERVED,
                 detection=f"{b.label} observed = 0",
-                diagnosis=_diagnose_zero_observed(b, batch_beats.get(b.batch_id)),
+                diagnosis=_diagnose_zero_observed(
+                    b, batch_beats.get(b.batch_id), b.batch_id in missed_batches
+                ),
                 detail={"trigger_slot": b.slot, "batches": day_snapshot, "thresholds": thresholds},
             ))
 
@@ -247,7 +286,8 @@ class JobBeat:
     last_run: datetime | None  # 最近一次執行結束時間(None = 從無心跳)
     last_status: str | None  # success / failed
     last_summary: dict[str, Any]
-    runs_today: int  # 當天(台灣日)跑了幾次
+    runs_today: int  # 當天(台灣日)**真的跑了**幾次(不含被排程丟棄的)
+    missed_today: int = 0  # 當天被 APScheduler 丟棄幾次(沒跑,見 jobs.record_missed)
 
     @property
     def label(self) -> str:
@@ -261,17 +301,28 @@ async def load_job_beats(
     now = now or datetime.now(UTC)
     beats: dict[str, JobBeat] = {}
     for job in ALL_JOBS:
+        # ★ 只認「真的跑過」的心跳:被排程丟棄(missed)不算有跑,否則會把
+        # 「被丟棄」誤當成「有心跳」,反而讓「沒跑」的警鈴啞掉。
         row = (
             await session.execute(
-                select(JobRunLog).where(JobRunLog.job == job)
+                select(JobRunLog)
+                .where(JobRunLog.job == job, JobRunLog.status.in_(RAN_STATUSES))
                 .order_by(JobRunLog.finished_at.desc()).limit(1)
             )
         ).scalars().first()
+        today_expr = func.to_char(
+            func.timezone("Asia/Taipei", JobRunLog.finished_at), "YYYY-MM-DD"
+        )
         runs_today = int(await session.scalar(
             select(func.count()).select_from(JobRunLog).where(
-                JobRunLog.job == job,
-                func.to_char(func.timezone("Asia/Taipei", JobRunLog.finished_at), "YYYY-MM-DD")
-                == taiwan_date,
+                JobRunLog.job == job, JobRunLog.status.in_(RAN_STATUSES),
+                today_expr == taiwan_date,
+            )
+        ) or 0)
+        missed_today = int(await session.scalar(
+            select(func.count()).select_from(JobRunLog).where(
+                JobRunLog.job == job, JobRunLog.status == STATUS_MISSED,
+                today_expr == taiwan_date,
             )
         ) or 0)
         beats[job] = JobBeat(
@@ -280,6 +331,7 @@ async def load_job_beats(
             last_status=row.status if row else None,
             last_summary=(row.summary or {}) if row else {},
             runs_today=runs_today,
+            missed_today=missed_today,
         )
     return beats
 
@@ -371,6 +423,8 @@ def _job_line(beat: JobBeat) -> str:
     # ★ 跑的是不是最新 code —— 常駐 daemon 會把程式碼凍結在啟動當下,改了 code 不重啟
     # 就一直跑舊邏輯,而且 log 照常、批次照常,完全沒有訊號(2026-08-01 實際踩到:
     # harvest 跑了 16 天舊 code)。心跳帶 code_version 後,這件事變成看得見的。
+    if beat.missed_today:
+        detail += f" (被排程丟棄 {beat.missed_today} 次)"
     ran_version = beat.last_summary.get("code_version")
     if ran_version and CODE_VERSION and ran_version != CODE_VERSION:
         return (f"{beat.label}:{detail} ⚠️ 跑的是舊 code({ran_version},"
@@ -438,8 +492,9 @@ async def run_alarm_check(
             batches = await load_today_batches(session, taiwan_date)
             beats = await load_job_beats(session, taiwan_date)
             batch_beats = await load_baseline_batch_beats(session, taiwan_date)
+            missed = await load_missed_baseline_batches(session, taiwan_date)
             # baseline 三警鈴(既有,不變;診斷改讀心跳)+ 四條鏈路心跳巡檢。
-            alerts = evaluate(batches, batch_beats) + evaluate_jobs(beats)
+            alerts = evaluate(batches, batch_beats, missed) + evaluate_jobs(beats)
             if not alerts:
                 # 無異常也主動回報一則「安好摘要」當心跳(證明 daemon 活著)。
                 # 心跳不是異常,不寫 alert_log(alert_log 保持只記異常)。

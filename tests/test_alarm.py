@@ -429,3 +429,88 @@ def test_daily_heartbeat_flags_stale_code() -> None:
         JOB_HARVEST, runs_today=8,
         summary={"selected": 15, "eligible": 500, "code_version": CODE_VERSION})
     assert "跑的是舊 code" not in build_heartbeat("2099-01-01", [], beats)
+
+
+# --- misfire:被排程丟棄是第四種原因(2026-08-02)-----------------------------
+
+
+def test_missed_batch_diagnosed_as_scheduler_drop_not_daemon_dead() -> None:
+    """★ 被 APScheduler 丟棄 → 不可診斷成「daemon 沒跑 / 報錯 / 沒 load」。
+
+    真實案例(8/1):12:00 harvest、21:00 baseline、21:00 harvest 因約 2 秒的停頓被
+    整個丟棄(misfire_grace_time 預設僅 1 秒)。daemon 是活的、code 是好的 ——
+    去救 daemon 是白費工,要調的是 misfire_grace_time。
+    """
+    b = _b(1, seeds=0, observed=0, exists=False)
+    alerts = evaluate([b, _b(2, seeds=30, observed=30), _b(3, seeds=30, observed=30)],
+                      {}, {b.batch_id})
+    d = next(a.diagnosis for a in alerts if a.alert_type == ALERT_ZERO_OBSERVED)
+    assert "被排程丟棄" in d and "misfire" in d
+    assert "根本沒執行" in d
+    assert "daemon 死了" not in d.replace("不是 daemon 死了", "")  # 只以否定形式出現
+
+
+def test_not_missed_batch_keeps_previous_diagnoses() -> None:
+    """沒被丟棄的批 → 仍走既有診斷(無心跳 = 執行異常)。"""
+    b = _b(1, seeds=0, observed=0, exists=False)
+    alerts = evaluate([b, _b(2, seeds=30, observed=30), _b(3, seeds=30, observed=30)], {}, set())
+    d = next(a.diagnosis for a in alerts if a.alert_type == ALERT_ZERO_OBSERVED)
+    assert "執行異常" in d and "被排程丟棄" not in d
+
+
+def test_missed_does_not_count_as_a_run_in_daily_summary() -> None:
+    """★ 被丟棄不算「有跑」,且每日安好要看得出被丟棄幾次。"""
+    beats = _healthy_beats()
+    beats[JOB_HARVEST] = JobBeat(
+        job=JOB_HARVEST, last_run=datetime.now(UTC) - timedelta(hours=1),
+        last_status="success", last_summary={"selected": 15, "eligible": 500},
+        runs_today=6, missed_today=2)
+    msg = build_heartbeat("2099-01-01", [], beats)
+    assert "被排程丟棄 2 次" in msg
+    assert "6/8" in msg  # 真的跑了 6 次(不把被丟棄的算進去)
+
+
+async def test_record_missed_writes_missed_status(session: AsyncSession) -> None:
+    """被丟棄要留下結構化記錄(不能只在 stderr 留一行字)。"""
+    from mes.jobs import STATUS_MISSED, record_missed
+
+    maker = async_sessionmaker(bind=session.bind, expire_on_commit=False)
+    job = f"testjob_{uuid.uuid4().hex[:8]}"
+    when = datetime.now(UTC)
+    await record_missed(job, when, {"job_id": "harvest_slot_3", "batch_id": "2099-01-01-03"},
+                        session_maker=maker)
+    row = await session.scalar(select(JobRunLog).where(JobRunLog.job == job))
+    assert row is not None and row.status == STATUS_MISSED
+    assert row.summary is not None and row.summary["batch_id"] == "2099-01-01-03"
+    assert row.error is not None and "misfire" in row.error
+
+
+def test_scheduler_sets_misfire_grace_on_every_job() -> None:
+    """★ 每個 job 都要有寬限窗 —— 預設 1 秒會讓 2 秒的卡頓吃掉整批。"""
+    from mes.schedule import MISFIRE_GRACE_SECONDS, build_scheduler
+
+    assert MISFIRE_GRACE_SECONDS >= 600  # 寧可晚跑,不要不跑
+    sched = build_scheduler()  # 未 start,不需 shutdown
+    jobs = sched.get_jobs()
+    assert len(jobs) == 4  # 3 baseline slots + store_harvest
+    for j in jobs:
+        assert j.misfire_grace_time == MISFIRE_GRACE_SECONDS, j.id
+        assert j.coalesce is True, j.id
+
+
+def test_code_version_marks_dirty_working_tree() -> None:
+    """★ 工作樹髒時 hash 必須標 -dirty。
+
+    沒有它,daemon 跑著「含未 commit 改動的 code」卻回報乾淨的 commit hash ——
+    又是一個「看起來對、其實不對」的訊號,而且正好在最需要它的場景(開發中)失真。
+    """
+    import subprocess
+
+    from mes.jobs import _resolve_code_version
+
+    v = _resolve_code_version()
+    assert v is not None
+    dirty = bool(subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=no"],
+        capture_output=True, text=True, check=False).stdout.strip())
+    assert v.endswith("-dirty") == dirty, f"code_version={v} 與工作樹狀態不符"
