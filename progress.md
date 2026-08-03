@@ -6,6 +6,76 @@
 
 ---
 
+## 2026-08-03 — Phase 3:AI 第一次進場,循環跑通(生成 → 審核 → Decision Graph)
+
+> 這天做完 Phase 3 三批,並**實際跑通一次完整循環**:LLM 產出真實假說 → Jeff 在網頁審核
+> → decision 進 Decision Graph。**AI 第一次在 MES 裡做「會死的預測」。**
+
+### 三批
+
+1. **第一批(`a18abee`)資料層** —— `hypothesis` / `decision` 兩張表 + predicate registry + pattern → 撈店查詢。
+   兩個文件沒明寫但屬其意圖的守門:`source_insight_refs` 與 `pattern` 的**空陣列也要擋**
+   (NOT NULL 擋不住 `[]`,而空引用等同沒有 Provenance)。
+2. **第二批-A(`9955f42`)生成** —— LLMProvider 抽象 + Pattern 聚合 + prompt 檔案版本化 + 手動觸發。
+3. **第二批-B(`9955f42`)審核** —— 本機網頁,三動作 + Decision Graph 串鏈。
+
+### 第一次真實生成的結果
+
+```
+claude-opus-5 · 3 pattern · 3 次呼叫 · 7421 tokens
+寫入 6 條 pending · 擋下 3 條(全是 predicate 未登記)
+```
+
+輸入確實單薄(163 家店全只有 `SKU_SCALE` 一維),**未為此放寬聚合或補造 insight**。
+LLM 沒把單薄證據講成 `certain`(每個 pattern 各 1 條 `inferred` + 1 條 `estimated`)。
+
+### ★ 過程中修了兩個真實 bug —— 都是我的,不是 LLM 的
+
+1. **模型 id 憑記憶寫成 `claude-opus-4-20250514` → 404。** 改成查 `client.models.list()`。
+   連「模型名稱」這種看似記得住的東西也踩到 —— **「我記得」不是查證。**
+2. **★ registry 靠 import 副作用 → 測試全過、生產全掛。** 9 條產出被擋下 6 條,
+   錯誤是 `insight_type 'SKU_SCALE' 未登記(已登記:[])` —— 入口點從沒 import 到 producers。
+   **測試會過是因為測試檔自己 import 了它。** 這是「掛上去 ≠ 會執行 ≠ 有產出 ≠ 跑的是新 code」
+   家族的第四層:**測得過 ≠ 生產跑得起來**。
+
+### 兩個判斷(Jeff 裁決)
+
+- **predicate 補登記行為三態** —— `SWAP` / `ADOPT` / `NO_ADOPTION`。**這是被真實產出逼出來的**:
+  registry 刻意只登記一個、不預先窮舉,結果 LLM 一再想表達 `SWAP` 涵蓋不了的意圖。
+  **「先留空、讓真實需求填」的價值在第一次生成就兌現了。**
+  拒收 `LOCALIZATION_APP_INTENT`:**「行為意圖」與「產品範疇」是兩個正交維度,不該壓成一個欄位**
+  (否則值域隨 app 類別相乘爆炸)。
+- **LLM 提出「pattern 該再切一刀」→ reject,但不擴充語法。** 現行 pattern 只支援等值 AND,
+  表達不了 `avg_price < 35`。**保留為 Phase 5 演化語法時的真實 test case。**
+
+### ★ 一件我刻意沒做的事
+
+提示詞要求「實際用它審核那 6 條假說」,但 Jeff 只對 1 條給了明確裁決 →
+**只執行那 1 條,其餘 5 條留白。** approve/reject 是商業判斷;Roadmap 停止條件明載
+「AI 做 approve 以外的決策 → 停」;且 `decision.actor='jeff'`,代按等於把話塞進他嘴裡,
+會**污染未來演化的素材**。已寫進 CLAUDE.md 成為常駐準則。
+
+### 驗收:2/4 達成,2/4 無法驗證
+
+| 條件 | 狀態 |
+|---|---|
+| 假說結構化、帶 evidence、引用 Insight、可審核 | ✅ |
+| reject 進 Decision Graph | ✅ |
+| 換模型各自產生假說 | ⚠️ 無法驗證(只有一個 provider)|
+| 可分別評估模型觀察力與推理力 | ⚠️ 無法驗證 |
+
+**Phase 3 刻意不標 ✅** —— 標了會讓人誤以為 P4(Model Agnostic)已驗證。
+**「架構就緒」≠「驗收通過」**:抽象層已證明正確(MockProvider 跑完整流程、零 API 呼叫),
+但「換掉模型系統照樣運作」**從未實際執行過一次**。Jeff 明確表示短期不辦第二組 key ——
+故記為**已知缺口,非待辦事項**。
+
+### 當日結束狀態
+
+hypothesis:**5 pending / 1 rejected**;decision:1 筆(jeff / reject)。
+測試 275 passed;ruff / mypy 綠。審核頁 `python -m mes.review`(只綁 127.0.0.1)。
+
+---
+
 ## 2026-08-02 — misfire:框架預設值吃掉三個批次
 
 **查證起點:** 8/1 21:00 那批 observed=0 且無心跳,但 daemon 今早才重啟過、應該跑新 code。

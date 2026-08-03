@@ -540,6 +540,22 @@ Insight  →  AI  →  Hypothesis(特徵組合 → 預測 + confidence + evidenc
 
 **進入條件:** Phase 3 通過 + Phase 3.5 至少一種合規、可收反饋的接觸行為就緒。
 
+> **實況更新(2026-08-03,Phase 3 跑通後 —— 兩個影響 Phase 4 前提的事實):**
+>
+> 1. **Phase 3 未標 ✅,而是「2/4 達成、2/4 無法驗證」。** 「換模型」與「分別評估模型觀察力/推理力」
+>    兩條**從未實際執行過**(只有一個 LLM provider,Jeff 短期不辦第二組 key)。
+>    所以 **P4(Model Agnostic)目前是「架構就緒」而非「已驗證」** —— Phase 4 若要比較
+>    「哪個模型的假說比較準」,前提尚未具備。
+> 2. **★ pattern 語法只支援「insight 等值條件的 AND 組合」,表達不了數值範圍。**
+>    第一次生成時 LLM 就提出了「應依 `avg_price < 35` 再切一刀」的假說,因**現行 pattern
+>    撈到的店會涵蓋所有價位、與假說想打的對象不一致**而被 reject
+>    (保留為 Phase 5 演化語法時的真實 test case)。
+>    **Phase 4 執行時要注意:一條假說的 pattern 撈出來的店,就是它實際會打到的對象** ——
+>    若假說的敘述比 pattern 更精細,兩者會不一致,歸因會失真。
+>
+> **可用的假說庫存(2026-08-03):5 條 pending、1 條 rejected** —— 全部 `predicted_outcome`
+> 皆為 `SWAP_APP_INTENT`,且 pattern 都只有 `SKU_SCALE` 一維(因為 Insight 層目前只有這一維)。
+
 **關鍵約束:**
 - **Experiment 與 Outcome 必須一起做**:沒有同步反饋機制,接觸資料就永遠丟失(資料黑洞)。
 - **單變數原則**:一次只測一個變數(A/B 核心,隔離變數才能歸因)。

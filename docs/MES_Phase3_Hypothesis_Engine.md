@@ -163,6 +163,50 @@ Phase 4 執行時需要「這個 Pattern 對應哪些店」的查詢 →
 
 ---
 
+### 實作落地補充(2026-08-03 第二批 A+B)
+
+**A 段 — 生成(`src/mes/llm.py` + `src/mes/hypothesis.py` + `prompts/hypothesis_v1.md`)**
+
+- **Prompt 版本化:存成檔案,版本號 = 檔名**(`hypothesis_v1` → `prompt_version`)。改版 = 新檔案,舊檔保留 → 走 git,天然版本化(P5)。
+- **手動觸發,不排程(Jeff 定案):** 生成要花 API 費用,且會**產出待審佇列** —— 而**審核是 Jeff 的人工時間**。排程會讓待審自己累積,人卻不會自己變多。
+- **驗證守門:寫入前跑 pattern 結構 / predicate registry / Provenance 非空 / rationale 非空 / confidence 三級。不過就不寫入並記錄原因** —— 不靜默丟棄、**也不放寬驗證讓 LLM 的產出通過**。
+- **LLM 想用但未登記的 predicate 結構化記錄**(`wanted_predicates`)—— 這是決定 predicate 清單的**真實素材**,比憑空窮舉好(見第一次生成的實際結果)。
+
+**B 段 — 審核(`src/mes/review.py`)**
+
+- **★ 頁面以「讀得懂」為第一優先。** 驗收條件「可審核」的實質**不是「有按鈕可按」**,而是**人真的讀得懂這條假說在說什麼** → pattern 翻成人話(`SKU_SCALE = Low SKU`)、rationale 完整好排版、**顯示符合該 pattern 的店家數**(判斷樣本夠不夠是審核的關鍵依據)、Provenance 與版本資訊可見。
+- **Comment 是純註記:** 寫進 decision 表但 hypothesis **維持 `pending`**,讓人先留想法再決定。(「要求 AI 依 comment 修改」屬 Phase 5,現在沒有 Outcome 當燃料。)
+- **Reject 必須填理由** —— 理由是未來演化的素材,空的等於沒記。
+- **只綁 127.0.0.1,所以不加登入認證** —— 沒有對外暴露就沒有未授權存取問題,不為此加一套用不到的帳密系統。**有測試守 `HOST == "127.0.0.1"`:那是「不需要認證」這個決定的前提,前提變了就要重新考慮。**
+- **rationale 必須 HTML 逃脫** —— 那是 LLM 產生的文字,直接渲染等於自己打自己。
+- **零新增相依** —— 標準庫 `http.server` + 伺服器端渲染,不為內部工具引入前端框架 / 建置流程。
+
+### 第一次真實生成的紀錄(2026-08-03)
+
+```
+model claude-opus-5 · 3 個 pattern · 3 次呼叫 · 7421 tokens
+寫入 6 條(status=pending) · 被驗證擋下 3 條
+```
+
+- **輸入確實單薄**(163 家店全部只有 `SKU_SCALE` 一維 → 只聚出 3 個 pattern),**如預期,未為此放寬聚合或補造 insight**。
+- LLM **沒有把單薄證據講成 `certain`** —— 每個 pattern 各產 1 條 `inferred` + 1 條 `estimated`,符合 prompt 要求的誠實。
+- **被擋下的 3 條全是 predicate 未登記** → 直接促成了行為三態的登記(見下)。
+- **一條假說自己提出「pattern 該再切一刀」**(價格而非商品數),→ Jeff reject,理由記為
+  `Pattern specificity exceeds current aggregation capacity (requires sub-range avg_price < 35)`。
+  **不為單一 LLM 奇想擴充 pattern 語法**,保留為 **Phase 5 演化語法時的真實 test case**。
+
+### predicate 行為三態的形成(過程比結論值得記)
+
+registry 刻意只登記 `SWAP_APP_INTENT`,不預先窮舉。第一次生成時 LLM 一再想用未登記的值,
+**揭露了 `SWAP`(換掉)涵蓋不了「新裝」與「不裝」** —— 三種不同的市場行為。Jeff 據此登記
+`ADOPT_APP_INTENT` / `NO_APP_ADOPTION_INTENT`,構成**互斥且窮盡的行為三態**。
+
+**`LOCALIZATION_APP_INTENT` 刻意不收:** 「行為意圖」與「產品範疇(想裝哪類 app)」是**兩個正交維度**,
+混進同一欄位會讓值域隨 app 類別**相乘爆炸**(review×3、shipping×3、localization×3…)。
+**兩個正交維度該用兩個欄位,不該壓成一個。** 此類資訊第一版記在 `rationale`,不另開欄位。
+
+---
+
 ## 七、驗收(既有定義,能力導向)
 
 - [ ] 假說結構化、帶 evidence、引用 Insight、可審核
