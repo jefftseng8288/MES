@@ -5,6 +5,7 @@ description = "Market Evolution System — evidence-driven market observation pi
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.13",
+    "anthropic>=0.120.2",
     "apscheduler>=3.10",
     "asyncpg>=0.29",
     "httpx>=0.27",

@@ -389,16 +389,39 @@
 - [ ] **人的 reject 進 Decision Graph —— ✅ 做**(Jeff 審核假說時現在就會 reject,這條路徑要通)
 - [ ] **AI 讀舊假說產生進化版 —— ❌ 第一版不做**:證偽發生在 Phase 4,Phase 3 第一次跑時**沒有任何被證偽的假說可當輸入**,這個循環要等 Phase 4 有 Outcome 才轉得起來(屬 Phase 5 Evolution)。**schema 預留,第一版不開啟**
 
-*D. 換模型(P4 地基)+ 餵 LLM 的方式*
+*D. 換模型(P4 地基)+ 餵 LLM 的方式* — ✅ 第二批-A 完成(2026-08-03;審核介面屬 B 段)
 
-- [ ] `LLMProvider` 抽象(Factory Pattern):`AnthropicProvider` / `OpenAIProvider`。**採 API 直接調用(SDK),不依賴 CLI**(Claude Code 是終端機的開發 Agent,MES 是 Python backend,兩者不同)
-- [ ] **第一版可只實作一個 provider,但抽象層先做好** —— 換模型的架構成立,補第二個 provider 時不動核心。實務注意:API key 管理(Anthropic 已有,OpenAI 需另辦)
-- [ ] **★ 先聚合成 Pattern 分佈,再送 LLM** —— 不要把所有店的 raw insight 全塞給 LLM(浪費 token,且會陷入「Lost in the Middle」)。作法:① DB 聚合(SQL group by)算出商家模式分佈 → ② 把 Pattern Summary + 2–3 家代表性**匿名 sample** 丟給 LLM → ③ 讓 LLM 針對該 Pattern 專心產出高品質假說
-- [ ] **附帶好處:這正好解掉「輸入貧乏」的擔憂** —— LLM 看的是聚合後的分佈,14 家店也能形成 pattern,只是樣本小、confidence 低。**這是誠實反映現況,不是缺陷**
+- [x] `LLMProvider` 抽象(`src/mes/llm.py`,Factory Pattern):`AnthropicProvider` / `OpenAIProvider`。**採 API 直接調用(SDK),不依賴 CLI**(Claude Code 是終端機的開發 Agent,MES 是 Python backend,兩者不同)
+- [x] **第一版只實作 `AnthropicProvider`,抽象層已做好** —— 換模型的架構成立,補第二個 provider 時不動核心。實務注意:API key 管理(Anthropic 已有,OpenAI 需另辦)
+- [x] **★ 先聚合成 Pattern 分佈,再送 LLM**(`aggregate_patterns()` + 匿名 sample) —— 不要把所有店的 raw insight 全塞給 LLM(浪費 token,且會陷入「Lost in the Middle」)。作法:① DB 聚合(SQL group by)算出商家模式分佈 → ② 把 Pattern Summary + 2–3 家代表性**匿名 sample** 丟給 LLM → ③ 讓 LLM 針對該 Pattern 專心產出高品質假說
+- [x] **附帶好處:這正好解掉「輸入貧乏」的擔憂** —— LLM 看的是聚合後的分佈,14 家店也能形成 pattern,只是樣本小、confidence 低。**這是誠實反映現況,不是缺陷**
+
+*E. 假說生成(第二批-A)* — ✅ 完成(2026-08-03)
+
+- [x] Prompt 存成檔案 `prompts/hypothesis_v1.md`,**版本號 = 檔名**(改版 = 新檔案,走 git,天然版本化 P5)
+- [x] 假說生成:對每個 pattern 呼叫 LLM → 解析 JSON → **寫入前跑既有驗證**(pattern 結構 / predicate registry / Provenance 非空 / rationale 非空 / confidence 三級)→ 寫入 `status='pending'`
+- [x] 驗證不過 → **不寫入、記錄原因**(不靜默丟棄、也不放寬驗證讓它過)
+- [x] **★ LLM 想用但未登記的 predicate 結構化記錄**(`wanted_predicates`)—— 這是 Jeff 決定「該登記哪些 predicate」的**真實素材**,比憑空窮舉好。**不擅自擴充 registry**(有測試守著)
+- [x] `model` / `prompt_version` / `hypothesis_version` 據實填寫(P5)
+- [x] **手動觸發**(`uv run python -m mes.hypothesis`),**不掛 launchd、不進每日鏈** —— 每次生成花 API 費用且產出待審佇列,而**審核是 Jeff 的人工時間**;排程會讓待審自己累積
+- [x] token 用量記錄 + 呼叫上限(`MAX_LLM_CALLS=10`,暫定可調);API 錯誤/解析失敗 → 明確報錯並記錄(心跳留 `status='failed'`),**不重試到底、不假裝成功**
+- [x] **審核介面(第二批-B,2026-08-03)** —— `python -m mes.review` 本機服務(**只綁 127.0.0.1**;因未對外暴露故**刻意不加登入認證**,加了是過度設計)。Python 標準庫 `http.server` + 伺服器端渲染,**零新增相依、無前端框架**
+- [x] 頁面以「**能讀懂那條假說**」為第一優先:pattern 翻成人話(`SKU_SCALE = Low SKU`)、**顯示符合的店家數**(樣本夠不夠是審核關鍵)、rationale 完整好讀、Evidence / 版本資訊(P5)、可切換 pending / approved / rejected / 全部(已審核的仍看得到,否則審完就消失無法回顧)
+- [x] 三動作:Approve → `approved`;Reject → `rejected` + `rejection_reason`(**理由必填**);**Comment → 維持 `pending`**(純註記,讓人先留想法再決定)
+- [x] `parent_decision_id` 串鏈:新 decision 指向該假說**上一次**的 decision;頁面顯示決策史
+- [x] predicate registry 補登記 `ADOPT_APP_INTENT` / `NO_APP_ADOPTION_INTENT`(**行為三態**,由真實產出逼出來);`LOCALIZATION_APP_INTENT` 刻意不收(產品範疇 ≠ 行為意圖)
 
 ### ✅ 驗收(Acceptance)
 
-**狀態:** ⬜ 未驗收(Phase 尚未開始)
+**狀態:** ⬜ 未驗收(Phase 進行中)
+
+> **★ 兩個誠實標記(不可因為「架構做好了」就標通過):**
+> 1. **「換模型(GPT ↔ Claude)」無法實際驗證** —— 目前只有 Anthropic 一個 provider。
+>    現況只證明**抽象層設計正確**(補 provider = 加一個子類別 + 註冊一行,呼叫端不動),
+>    **不等於該條驗收通過**。待第二個 provider 的 key 到位才能真正驗。
+> 2. **真實 API 尚未成功跑過** —— 2026-08-03 實跑,金鑰**認證成功**(錯誤碼 400 而非 401)
+>    但帳戶餘額不足(`credit balance is too low`)。整條鏈路已驗到 API 邊界,
+>    **但「LLM 實際產出的假說長什麼樣」目前仍是未知**,不可據此宣稱假說品質或驗收通過。
 
 **驗收條件:**
 - [ ] 假說結構化、帶 evidence、引用 Insight、可審核

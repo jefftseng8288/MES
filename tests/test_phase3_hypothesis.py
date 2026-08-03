@@ -132,9 +132,17 @@ def test_registered_predicate_passes() -> None:
     assert PREDICATE_SWAP_APP_INTENT in registered_predicates()
 
 
-def test_registry_starts_small_not_exhaustive() -> None:
-    """★ 第一版只登記已確定會用的,不預先窮舉(合法值取決於未定的 Phase 4 武器)。"""
-    assert registered_predicates() == (PREDICATE_SWAP_APP_INTENT,)
+def test_registry_holds_only_decided_predicates() -> None:
+    """★ 只登記「已確定會用」的,不預先窮舉 —— 這條守門是為了擋住「順手補齊一套」的衝動。
+
+    目前三個 = 商家對 app 的**行為三態**(互斥且窮盡),由 2026-08-03 第一次真實生成的
+    產出逼出來的(LLM 一再想表達 SWAP 涵蓋不了的意圖),不是憑空列的。
+    `LOCALIZATION_APP_INTENT` 刻意不收:那是「產品範疇」不是「行為意圖」,收了會隨
+    app 類別數量爆炸。
+    """
+    assert registered_predicates() == (
+        "ADOPT_APP_INTENT", "NO_APP_ADOPTION_INTENT", "SWAP_APP_INTENT",
+    )
 
 
 def test_register_rejects_blank() -> None:

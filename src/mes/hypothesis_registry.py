@@ -9,9 +9,16 @@
 **判準與 Phase 2.5 的 `value_text` 相同:用「穩不穩定 / 會不會頻繁改」決定受控放 DB 還是應用層。**
 對比同一張表的 `status` / `confidence`(已定義完整、穩定)→ 有 DB CHECK。**同表刻意兩種待遇。**
 
-**★ 第一版只登記「已經確定會用」的少數 predicate,不預先窮舉。**
-目前只登記 `SWAP_APP_INTENT` —— 它是設計文件第一節唯一舉出的具體 predicate,非臆造。
-其餘等 Phase 4 的武器定了再登記。
+**★ 只登記「已經確定會用」的 predicate,不預先窮舉。**
+
+**2026-08-03 更新(Jeff 裁決,依真實素材):** 第一次真實生成時,LLM 一再想表達
+`SWAP_APP_INTENT` 涵蓋不了的意圖 —— 於是補登記成**商家對 app 的行為三態**
+(互斥且窮盡):換掉現有的 / 新裝 / 不裝。**這是被真實產出逼出來的,不是憑空窮舉。**
+
+**`LOCALIZATION_APP_INTENT` 刻意不登記(Jeff 裁決):** 「想裝**哪一類** app」是**產品範疇**,
+與「**行為意圖**」是兩個正交維度;混進 predicate 會讓它隨 app 類別數量爆炸
+(每多一類 app 就多一個 predicate)。**這類資訊第一版記在 `rationale` 裡,不另開欄位** ——
+等真實需求證明需要再結構化。
 """
 
 from __future__ import annotations
@@ -52,6 +59,13 @@ def validate_predicate(predicate: str) -> None:
         )
 
 
-# --- 第一版的登記(唯一一個,取自設計文件第一節的具體例子)------------------------
-PREDICATE_SWAP_APP_INTENT = "SWAP_APP_INTENT"
-register_predicate(PREDICATE_SWAP_APP_INTENT)
+# --- 已登記:商家對 app 的行為三態(互斥且窮盡)---------------------------------
+PREDICATE_SWAP_APP_INTENT = "SWAP_APP_INTENT"  # 換掉現有的 app
+PREDICATE_ADOPT_APP_INTENT = "ADOPT_APP_INTENT"  # 新裝(原本沒有)
+PREDICATE_NO_APP_ADOPTION_INTENT = "NO_APP_ADOPTION_INTENT"  # 無意願、不裝
+for _p in (
+    PREDICATE_SWAP_APP_INTENT,
+    PREDICATE_ADOPT_APP_INTENT,
+    PREDICATE_NO_APP_ADOPTION_INTENT,
+):
+    register_predicate(_p)

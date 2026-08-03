@@ -22,6 +22,12 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# ★ registry 是靠「Producer 類別定義時的 __init_subclass__」填充的 —— 這是**隱性依賴**:
+# 沒 import 到 producers,registry 就是空的,而 pattern 驗證會全數失敗。
+# 實測踩過:`python -m mes.hypothesis` 因為沒有 import 到 producers,
+# 所有 pattern 都被判成「insight_type 未登記(已登記:[])」—— 測試卻通過,
+# 因為測試檔本身有 import producers。**驗證方必須自己保證 registry 已填充。**
+import mes.insight_producers  # noqa: F401  (import 有副作用:登記 insight_type)
 from mes.db.models import InsightStore
 from mes.insight_registry import InsightValueError, validate_insight_value
 

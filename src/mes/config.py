@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
 
+    # LLM(Phase 3)。留空 = 無法呼叫該 provider(會明確報錯,不靜默假裝成功)。
+    # 走與其他機密相同的管道:.env(已 gitignore),絕不硬編、絕不進版控。
+    anthropic_api_key: str = Field(default="")
+    openai_api_key: str = Field(default="")  # 尚未實作 provider,先留位
+
 
 def get_settings() -> Settings:
     """Load settings, raising a clear error if required variables are missing."""
