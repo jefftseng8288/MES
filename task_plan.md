@@ -345,13 +345,20 @@
 
 ## Phase 3 — Hypothesis Engine(AI 進場做預測)
 
-**狀態:** 未開始
+**狀態:** 🔄 進行中(第一批「資料層地基」完成:hypothesis / decision 表 + predicate registry + pattern 查詢;第二批「LLMProvider / Pattern 聚合 / 假說生成 / 審核流程」未做)
 
 **目的:** 第一次讓 AI 做「會死的預測」。AI 只扮演 Observation/Knowledge/Hypothesis 角色,不做 Decision。
 
 **進入條件:** Phase 2.5 通過,Insight 層乾淨且可作為輸入。
 
-**工作項目:**
+**設計文件:** `docs/MES_Phase3_Hypothesis_Engine.md`(實作前準備:雙層資料模型、Pattern 粒度、Decision Graph 分界、LLMProvider 抽象、聚合後餵 LLM)。
+
+> **★ Phase 3 驗的是「假說的形狀」,不是「假說對不對」。** 證偽發生在 Phase 4 —— 沒有 Outcome 之前「準不準」根本無法評估,驗收條件裡因此**沒有任何「假說要準」的要求**。
+> **實作紀律:不要不自覺地想「怎麼讓 AI 產出更準的假說」** —— 那個問題在 Phase 4 之前無解,現在追求它只會變成憑感覺調 prompt(而「感覺更好」不是證據)。
+>
+> **開工前提:輸入貧乏是已知且接受的(Jeff 定)。** `insight_store` 目前只有 `SKU_SCALE`;`GROWTH_VELOCITY` 約一個月後才有真實資料 → 第一批假說會單薄。**但這不構成延後的理由** ——「豐富」沒有定義,以它為前提等於無限期拖延;真正能回答「資料夠不夠」的是 Phase 4 的 Outcome。**能力先建好,資料長出來自然變好。**
+
+**工作項目(骨架 —— 概念層,保留):**
 
 - [ ] 產出結構化 Hypothesis(特徵組合 → 預測 + confidence + evidence),非散文
 - [ ] 每條 Hypothesis 引用它基於哪個 Insight(Provenance)
@@ -359,7 +366,35 @@
 - [ ] P5 第一版兌現:版本化 Model / Prompt / Hypothesis;Knowledge 用 timestamp;Crawler 掛 git hash
 - [ ] 支援換模型(GPT ↔ Claude)讀同一份 Knowledge/Insight 各自產生假說(P4 地基)
 - [ ] 可分別評估模型的觀察力(Insight)與推理力(Hypothesis)
-- [ ] ⚠️ **待拍板:第一版「學習深度」** — 建議「只記錄 + 累積驗證次數」,confidence 先不自動裁決(守 P1 held);schema 預留「調信心度」與「長新假說」,第一版不開啟。**此項在 Roadmap v8 仍為待拍板,尚未定案。**
+- [x] ~~⚠️ 待拍板:第一版「學習深度」~~ → **✅ Jeff 定案(2026-08-03)**:第一版**只記錄 + 累積驗證次數**,confidence **不自動裁決**(守 P1 held);schema **預留**「調信心度」與「長新假說」,**第一版不開啟**。理由:現在連一個 Outcome 都沒有,自動裁決沒有燃料。
+
+**實作層工作項(依設計文件補;分批建議:A = 第一批,B/C/D = 第二批):**
+
+*A. Hypothesis 資料模型 —— ★ 雙層設計(受控 predicate + 自由 rationale)* — ✅ 第一批完成(2026-08-03,migration `c059c8eec042`)
+
+- [x] 新表 `hypothesis`:`hypothesis_id`(PK)/ **Pattern 定義**(見 B)/ `predicted_outcome`(受控 predicate)/ `rationale`(自由文字)/ `confidence` / `source_insight_refs` / `model` / `prompt_version` / `hypothesis_version` / `status` / `parent_hypothesis_id` / `rejection_reason` / `created_at`
+- [x] **雙層的理由:** 預測若全是自由文字,**Phase 4 的判官無法用程式碼判斷「驗證成功還失敗」**。受控層 `predicted_outcome` 給**系統判讀**(Phase 4 可純函數比對 `ActualOutcome == PredictedOutcome`);描述層 `rationale` 給**人閱讀**(並作未來影片/信件腳本的參考)
+- [x] **predicate 受控用應用層 registry,不下沉 DB CHECK** —— 同 Phase 2.5 value_text 的判準(用「穩不穩定」決定受控放哪)。合法值**取決於 Phase 4 實際用哪些武器,而那還沒定**(武器庫優先序是 listing 優化 / Build in Public 第 1、cold email 第 3,現在定死 `EMAIL_OPEN` 之類很可能定出一組用不到的);且受控清單**加值容易、收回難**(Phase 1-C 踩過)。**第一版只登記「已確定會用」的少數 predicate,不預先窮舉**
+- [x] `source_insight_refs` 依 Provenance 鐵律:上游引用不可為空(**NOT NULL + 非空陣列 CHECK** —— NOT NULL 擋不住 `[]`)
+- [x] 新表 `decision`(Decision Graph):含 `parent_decision_id`;`target_type` + `target_id` **泛型指向**(代價:無 FK 保證參照完整性,取捨已記進設計文件)
+
+*B. ★ 粒度:針對「特徵組合(Pattern / Archetype)」,絕不每店一條* — ✅ schema + 查詢完成(生成邏輯屬第二批)
+
+- [x] **這是最核心的決定。** 針對單一店家只有 **1 次驗證機會(N=1)** → 發一封信被拒,分不清是「假說爛」還是「那家老闆剛好心情不好」→ **假說無法被證偽,confidence 機制直接崩塌**,違反 P1「裁判需要足夠投票數」
+- [x] 針對特徵模式(如 `[High SKU + Rating Crisis + Loox User]`)→ 一條假說可套用在 200 家符合特徵的店上 → Phase 4 發 200 次、收 30 個反應 → **算得出統計信心度**,假說演化才成立
+- [x] **★ Pattern 必須是「可執行的條件」,不能只是文字** —— Phase 4 需要「這個 Pattern 對應哪些店」的查詢,故 Pattern 定義**必須能翻譯成 SQL 去撈店**(結構化的 insight_type/value 條件組合,而非「高流量的美妝店」這種散文)。**這要寫進 schema,否則 Phase 4 拿到假說卻不知道要打誰**
+
+*C. Decision Graph:schema 現在建,演化循環第一版不開*
+
+- [ ] **人的 reject 進 Decision Graph —— ✅ 做**(Jeff 審核假說時現在就會 reject,這條路徑要通)
+- [ ] **AI 讀舊假說產生進化版 —— ❌ 第一版不做**:證偽發生在 Phase 4,Phase 3 第一次跑時**沒有任何被證偽的假說可當輸入**,這個循環要等 Phase 4 有 Outcome 才轉得起來(屬 Phase 5 Evolution)。**schema 預留,第一版不開啟**
+
+*D. 換模型(P4 地基)+ 餵 LLM 的方式*
+
+- [ ] `LLMProvider` 抽象(Factory Pattern):`AnthropicProvider` / `OpenAIProvider`。**採 API 直接調用(SDK),不依賴 CLI**(Claude Code 是終端機的開發 Agent,MES 是 Python backend,兩者不同)
+- [ ] **第一版可只實作一個 provider,但抽象層先做好** —— 換模型的架構成立,補第二個 provider 時不動核心。實務注意:API key 管理(Anthropic 已有,OpenAI 需另辦)
+- [ ] **★ 先聚合成 Pattern 分佈,再送 LLM** —— 不要把所有店的 raw insight 全塞給 LLM(浪費 token,且會陷入「Lost in the Middle」)。作法:① DB 聚合(SQL group by)算出商家模式分佈 → ② 把 Pattern Summary + 2–3 家代表性**匿名 sample** 丟給 LLM → ③ 讓 LLM 針對該 Pattern 專心產出高品質假說
+- [ ] **附帶好處:這正好解掉「輸入貧乏」的擔憂** —— LLM 看的是聚合後的分佈,14 家店也能形成 pattern,只是樣本小、confidence 低。**這是誠實反映現況,不是缺陷**
 
 ### ✅ 驗收(Acceptance)
 

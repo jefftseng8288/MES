@@ -31,7 +31,7 @@ v7 相對 v6 的狀態對齊(把已拍板的「待拍板」補上,反映實際�
 14. **Observation/Knowledge 拍板為兩張表** — Event Sourcing:Observation_Log(唯一真相,Append-Only)+ Knowledge_State(物化視圖)。原「待拍板」撤除。
 15. **Discovery 正式列為 Deferred** — Discovery 是 Evolution 不是 Architecture;第一版寫死 Seed → Shopify Store。詳見新增的 Discovery 段落。
 16. **Phase 1 標為 BLOCKED** — 合法資料取得途徑未定。詳見 Phase 1 的 blocker 記錄(已淘汰路徑 + 待驗證候選)。
-17. Phase 3「學習深度」仍為待拍板(未變)。
+17. ~~Phase 3「學習深度」仍為待拍板~~ → **已於 2026-08-03 定案**(只記錄 + 累積驗證次數,不自動裁決;schema 預留但不開啟)。見 `MES_Phase3_Hypothesis_Engine.md` 第四節。
 
 v8 相對 v7 的決策(Jeff 定案):
 18. **Phase 1 狀態改為 ✅ 執行中(Running)** — 這條路徑已通過「合法底線」與「三問規則」校準:不與對方防火牆硬撞,以 Inferred(推論能力)合法、低頻、禮貌地搜集資料。撤除 v7 的 BLOCKED 定性與 blocker 待驗證記錄,改為明確的工程執行規格(見 Phase 1)。
@@ -508,9 +508,12 @@ Insight  →  AI  →  Hypothesis(特徵組合 → 預測 + confidence + evidenc
 
 **P5 第一版兌現:** 版本化 Model / Prompt / Hypothesis;Knowledge 用 timestamp;Crawler 掛 git hash。
 
-**第一版「學習」深度(建議,待拍板):**
-- 建議「只記錄 + 累積驗證次數」,confidence 先不自動裁決(守 P1 held)。
-- schema 預留「調信心度」與「長新假說」,第一版不開啟。
+**第一版「學習」深度(✅ Jeff 定案 2026-08-03,原為待拍板):**
+- **只記錄 + 累積驗證次數**,confidence **不自動裁決**(守 P1 held)。
+- schema **預留**「調信心度」與「長新假說」,**第一版不開啟**。
+- **理由:現在連一個 Outcome 都沒有,自動裁決沒有燃料。** 證偽發生在 Phase 4;
+  自動調信心度與長新假說要等 Outcome 累積後才轉得起來(屬 Phase 5 Evolution)。
+- 詳見 `MES_Phase3_Hypothesis_Engine.md` 第四節。
 
 **驗收標準:**
 - 假說結構化、帶 evidence、引用 Insight、可審核;reject 進 Decision Graph。

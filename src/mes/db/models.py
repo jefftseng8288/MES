@@ -64,6 +64,12 @@ PRODUCERS = ("mes_crawler_v1", "duckduckgo_v1", "manual_v1", "mes_store_crawler_
 # system-internal "to-do" marker. 'pending' 有 domain 待抓 / 'done' 已抓 / 'failed' 戳失敗可重試。
 HARVEST_STATUSES = ("pending", "done", "failed")
 
+# Phase 3 —— hypothesis 生命週期(Jeff 定案,4 值)。穩定、已定義完整 -> 適合 DB CHECK。
+#   retired = 曾 approve 但後來被市場淘汰(**Phase 5 用;第一版只建值,不啟用機制**)。
+HYPOTHESIS_STATUSES = ("pending", "approved", "rejected", "retired")
+# Decision Graph 的動作(穩定 -> DB CHECK)。
+DECISION_ACTIONS = ("approve", "reject", "comment")
+
 # Feature Taxonomy v1 — Market Features: describe the state of a Reality entity.
 # Not CHECK-locked: feature is an intentionally extensible vocabulary (new features
 # bump the taxonomy doc, not the schema). Listed for reference only.
@@ -426,6 +432,106 @@ class JobRunLog(Base):
         JSONB(none_as_null=True), nullable=True
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Hypothesis(Base):
+    """Phase 3 — AI 產出的「**會死的預測**」。
+
+    分層:Knowledge(中立事實)→ Insight(描述,可能永遠成立)→ **Hypothesis(預測,會死)**。
+    ★ Phase 3 產出預測但**不驗證**它們 —— 證偽發生在 Phase 4。
+
+    **★ 雙層設計(定案):**
+      - `predicted_outcome` = **受控 predicate**,給**系統判讀** —— Phase 4 才能用純函數比對
+        `ActualOutcome == PredictedOutcome`。若預測全是自由文字,判官無法自動判斷成敗。
+      - `rationale` = **自由文字**,記 LLM 的推論鏈,給**人閱讀**(並作未來影片/信件腳本參考)。
+
+    **★ 粒度:針對「特徵組合(Pattern)」,絕不每店一條。** 針對單一店家只有 1 次驗證機會
+    (N=1)—— 發一封信被拒,分不清是「假說爛」還是「那家老闆剛好心情不好」→ 假說無法被證偽,
+    confidence 機制直接崩塌,違反 P1「裁判需要足夠投票數」。針對 pattern 才能套用在 200 家上,
+    收 30 個反應 → 算得出統計信心度。
+    """
+
+    __tablename__ = "hypothesis"
+    __table_args__ = (
+        CheckConstraint(_sql_in("status", HYPOTHESIS_STATUSES), name="ck_hypothesis_status"),
+        CheckConstraint(_sql_in("confidence", CONFIDENCE_LEVELS), name="ck_hypothesis_confidence"),
+        # Provenance 鐵律:上游引用不可為空 —— NOT NULL 擋不住空陣列,故另加長度 CHECK。
+        CheckConstraint(
+            "jsonb_typeof(source_insight_refs) = 'array' "
+            "AND jsonb_array_length(source_insight_refs) > 0",
+            name="ck_hypothesis_source_refs_nonempty",
+        ),
+        # pattern 必須是「可執行的條件」,空 pattern 等於「打所有店」,不是有意義的假說。
+        CheckConstraint(
+            "jsonb_typeof(pattern) = 'array' AND jsonb_array_length(pattern) > 0",
+            name="ck_hypothesis_pattern_nonempty",
+        ),
+    )
+
+    hypothesis_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # ★ 可執行的條件(不是文字描述)—— Phase 4 要靠它查「這個 Pattern 對應哪些店」。
+    # 形狀:[{"insight_type": ..., "value_text": ...}, ...],**第一版只支援 AND 組合**。
+    # 若 pattern 只是散文,Phase 4 拿到假說卻不知道要打誰。翻譯成查詢見 mes.patterns。
+    pattern: Mapped[list[dict[str, Any]]] = mapped_column(JSONB(none_as_null=True), nullable=False)
+    # 受控 predicate —— **刻意不下沉 DB CHECK**(見 mes.hypothesis_registry):合法值取決於
+    # Phase 4 實際用哪些武器,而那還沒定;現在定死很可能定出一組用不到的。判準同 Phase 2.5
+    # 的 value_text:用「穩不穩定 / 會不會頻繁改」決定受控放 DB 還是應用層。
+    predicted_outcome: Mapped[str] = mapped_column(String(64), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)  # LLM 推論鏈,給人讀
+    confidence: Mapped[str] = mapped_column(String(20), nullable=False)
+    # Provenance:這條假說基於哪些 insight(不可為空,見上方 CHECK)。
+    source_insight_refs: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=False
+    )
+    # P5 版本化:哪個模型 / 哪版 prompt / 哪版假說結構產生的(換模型比較的依據)。
+    model: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    hypothesis_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    # 演化鏈:**第一版只建欄位,不啟用機制** —— 證偽在 Phase 4,現在沒有被證偽的假說可當輸入,
+    # 「AI 讀舊假說產生進化版」的循環要等 Outcome 才轉得起來(屬 Phase 5)。
+    parent_hypothesis_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("hypothesis.hypothesis_id"), nullable=True
+    )
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 「這條假說何時被產生」= 執行時間(同 insight 的 generated_at 判準,不是歷史事實)。
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+
+
+class Decision(Base):
+    """Decision Graph —— 每個 Decision 是**對前一個 Decision 的回應**。
+
+    **為什麼獨立成表而非記在 hypothesis 上:** Roadmap 定義 Decision Graph 是**橫切概念**
+    (未來不只假說會有 decision);且「被 reject 兩次才 approve」這種**決策史**,記在
+    hypothesis 的單一欄位上表達不了 —— 那只留得下最後一次結果,過程整個消失。
+
+    第一版只有「人的 reject/approve」這條路徑(Jeff 審核假說時現在就會用到);
+    「AI 讀舊決策產生進化版」屬 Phase 5,schema 預留、不啟用。
+    """
+
+    __tablename__ = "decision"
+    __table_args__ = (
+        CheckConstraint(_sql_in("action", DECISION_ACTIONS), name="ck_decision_action"),
+    )
+
+    decision_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    # 對前一個 Decision 的回應;根決策無父。
+    parent_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("decision.decision_id"), nullable=True
+    )
+    # ★ 泛型指向(type + id)而非寫死 hypothesis_id —— Roadmap 定義 Decision Graph 是橫切的,
+    # 未來會有別種決策對象。代價:**無法用 FK 保證參照完整性**(FK 只能指向單一表)。
+    # target_type 不 CHECK 鎖(同 alert_type:利擴充,新對象不必改 schema)。
+    target_type: Mapped[str] = mapped_column(String(32), nullable=False)  # 第一版:hypothesis
+    target_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)  # jeff / 模型名
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
 
 
 class InsightRunLog(Base):
