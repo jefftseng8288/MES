@@ -65,6 +65,43 @@ CODE_VERSION = _resolve_code_version()
 # 「實際會被執行的東西」放在哪些路徑 —— 判斷版本落差是否**有實質影響**時只看這些。
 CODE_PATHS = ("src", "prompts")
 
+_DIRTY_SUFFIX = "-dirty"
+
+
+def _split_dirty(version: str) -> tuple[str, bool]:
+    """`abc1234-dirty` -> `("abc1234", True)`。"""
+    if version.endswith(_DIRTY_SUFFIX):
+        return version[: -len(_DIRTY_SUFFIX)], True
+    return version, False
+
+
+def _code_paths_dirty() -> bool | None:
+    """工作樹**在 CODE_PATHS 之下**有沒有未 commit 的改動。`None` = 查不出來。
+
+    ★ 為什麼需要它:`git describe --dirty` 看的是**整棵工作樹** —— 只要改了一個 md,
+    hash 就變成 `-dirty`,而 `code_is_stale` 的保守分支會**在比對之前就判定 stale**。
+    結果就是「寫文件、還沒 commit」的那段期間,警告一直亮著(2026-08-13 實際發生:
+    daemon 跑的 code 與磁碟完全相同,只因三個未 commit 的文件檔就被要求重啟)。
+
+    這與 `code_is_stale` 是**同一個病的第二個入口**:上次是「純文件 **commit** 讓 HEAD
+    前進」,這次是「純文件的**未 commit 改動**讓工作樹變髒」。修法一致 —— **只看 code 路徑**。
+
+    註:與 `git describe --dirty` 有一處刻意的不一致 —— 這裡**把未追蹤檔也算成髒**
+    (`git status` 預設行為)。方向是保守的那邊:`src/` 下多一個還沒 `git add` 的新模組,
+    確實可能是「daemon 沒載到的東西」。
+    """
+    try:
+        out = subprocess.run(
+            ["git", "status", "--porcelain", "--", *CODE_PATHS],
+            cwd=Path(__file__).resolve().parent.parent.parent,
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return bool(out.stdout.strip())
+
 
 def code_is_stale(running_version: str | None) -> bool:
     """running 的版本與目前 HEAD 之間,`src/` 或 `prompts/` 有沒有**實質差異**。
@@ -78,19 +115,32 @@ def code_is_stale(running_version: str | None) -> bool:
     這與「產出為 0 要能分辨正常閒置與異常」是同一條原則:
     **警告必須分辨得出「有影響」與「沒差」,否則它會把自己訓練成雜訊。**
 
-    保守情況(回報為 stale,因為**無法確定**):任一邊帶 `-dirty`、或 git 查詢失敗。
+    ★ **`-dirty` 也套用同一條判準**(2026-08-13 補):`-dirty` 只說明「工作樹有改動」,
+    沒說改的是什麼。改的若是文件,daemon 載入的 code 與磁碟其實一模一樣 ——
+    此時仍要求重啟,就是上面那個病的第二個入口(見 `_code_paths_dirty`)。
+    故現在先問「髒的是不是 code 路徑」,不是一看到 `-dirty` 就投降。
+
+    保守情況(回報為 stale,因為**無法確定**):
+    - **running 端帶 `-dirty`** —— 那棵工作樹當時長怎樣**已經無從回溯**,只能保守。
+    - current 端帶 `-dirty` 且髒在 `src/` 或 `prompts/`(或查不出髒在哪)。
+    - git 查詢失敗 / running 的 commit 已不存在。
     """
     if not running_version or not CODE_VERSION:
         return False  # 資訊不足,不亂叫
     running, current = running_version.strip(), CODE_VERSION.strip()
     if running == current:
         return False
-    # 帶 -dirty 表示當時/現在有未 commit 的改動 -> 無從比較,保守視為 stale。
-    if running.endswith("-dirty") or current.endswith("-dirty"):
-        return True
+    running_base, running_dirty = _split_dirty(running)
+    current_base, current_dirty = _split_dirty(current)
+    if running_dirty:
+        return True  # 當時載入的是「某個 commit + 不明改動」-> 事後無從還原
+    if current_dirty and _code_paths_dirty() is not False:
+        return True  # 髒在 code 路徑(或查不出來)-> 保守
+    if running_base == current_base:
+        return False  # 只差在「磁碟有文件改動」,daemon 跑的 code 與磁碟相同
     try:
         out = subprocess.run(
-            ["git", "diff", "--name-only", f"{running}..{current}", "--", *CODE_PATHS],
+            ["git", "diff", "--name-only", f"{running_base}..{current_base}", "--", *CODE_PATHS],
             cwd=Path(__file__).resolve().parent.parent.parent,
             capture_output=True, text=True, timeout=5, check=False,
         )

@@ -6,6 +6,45 @@
 
 ---
 
+## 2026-08-13 —— stale 誤報的第二個入口 + 阻塞修法的生產驗證
+
+**一、生產驗證:8/12 的阻塞修法有效(查 `job_run_log` 實測,非推論)**
+
+| 時間 | baseline | 同時段 harvest |
+|---|---|---|
+| 8/11 02:00 | 02:00→03:33(93 分) | **03:00 整批消失** |
+| 8/12 02:00 | 02:00→03:23(84 分) | **03:00 整批消失**(修正尚未上線) |
+| 8/12 21:00 | 21:00→22:23(84 分) | ✅ 21:00→21:05 |
+| 8/13 02:00 | 02:00→03:26(87 分) | ✅ **03:00→03:07**(正是連兩天消失的那一格) |
+
+- 修正於 8/12 09:26 上線;8/12 10:00 起所有心跳 `code_version` = `c44a324`(**重啟生效的證據是換版,不是 PID 變了**)。
+- harvest 耗時 5–8 分與平時無異 → 兩條鏈路真的並行,不是排隊。
+- 8/12 日報的 `harvest 7/8` 是**修正上線前**那批(03:00)的歷史帳,非新損失。
+
+**二、修:stale 誤報從第二個入口回來(`-dirty`)**
+
+- 8/13 日報再度出現「跑的是舊 code(`c44a324`,目前 `c44a324-dirty`)」——
+  `-dirty` **全部來自三個未 commit 的文件檔**,`git status --porcelain -- src prompts` 為空,
+  daemon 跑的 code 與磁碟完全相同。8/12 修的是「純文件 commit」,這次是「純文件的未 commit 改動」。
+- **改的檔案:**
+  - `src/mes/jobs.py`:新增 `_split_dirty()`、`_code_paths_dirty()`(`git status --porcelain -- src prompts`);
+    `code_is_stale()` 不再一看到 `-dirty` 就 return True,改為先問「髒的是不是 code 路徑」。
+    保守只保留在真正無從判斷處:**running 端** `-dirty`、髒在 code 路徑、git 查不出來。
+  - `tests/test_alarm.py`:`test_code_is_stale_conservative_on_dirty` 拆成 5 條(running 端 dirty / 文件髒 /
+    code 髒 / 範圍不明 / **文件髒但 base commit 動到 code 仍須報**),另加 `_code_paths_dirty` 與實際 git 一致性測試。
+- **實跑結果:** `uv run pytest` → **286 passed**;`ruff check src tests` → All checks passed;`mypy src` → Success。
+- **未驗(誠實標記):** 生產端的「文件髒不再誤報」要等這批 code commit 後、`src/` 乾淨時才驗得到
+  —— 現在 `src/mes/jobs.py` 自己就是髒的,`_code_paths_dirty()` 正確回報 `True`。
+
+**三、文件(未 commit,待 Jeff 裁決)**
+
+- 新增 `docs/MES_Positioning_Revision_v1.md` —— 2026-08-12 定位修正的概念討論紀錄(**非待辦清單**)。
+- `task_plan.md` / `docs/MES_Roadmap_v8.md`:Phase 4 暫緩理由補齊(v2 未上 production / listing 寫不出來 /
+  Loox 影片評論靜默遺失 / 歸因困境)、預計 8 月底、與 `GROWTH_VELOCITY` 觀測期重疊;
+  武器庫與單變數原則兩處加上指向新文件的連結。
+
+---
+
 ## 2026-08-12 — 阻塞式 sleep 地雷引爆 + 假警報收斂
 
 由 8/11 的每日安好觸發追查(`harvest 7/8` + 「跑的是舊 code」)。**一個是真問題,一個是假警報。**

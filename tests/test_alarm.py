@@ -576,18 +576,83 @@ def test_code_is_stale_flags_real_code_changes() -> None:
         j.CODE_VERSION = orig
 
 
-def test_code_is_stale_conservative_on_dirty() -> None:
-    """任一邊帶 -dirty → 無從比較,保守回報 stale(寧可多叫,不可漏)。"""
+def test_code_is_stale_when_running_side_is_dirty() -> None:
+    """running 端帶 -dirty → 保守 stale:那棵工作樹當時長怎樣**已無從回溯**。"""
     import mes.jobs as j
 
     orig = j.CODE_VERSION
     try:
         j.CODE_VERSION = "abc1234"
         assert j.code_is_stale("abc1234-dirty") is True
-        j.CODE_VERSION = "abc1234-dirty"
-        assert j.code_is_stale("def5678") is True
     finally:
         j.CODE_VERSION = orig
+
+
+def test_code_is_stale_ignores_dirty_from_docs_only(monkeypatch: Any) -> None:
+    """★ 磁碟只有**文件**未 commit → 不算 stale(2026-08-13 實際誤報)。
+
+    daemon 跑的 code 與磁碟一模一樣,只因三個未 commit 的 md 就被要求重啟 ——
+    與「純文件 commit 讓 HEAD 前進」是**同一個病的第二個入口**。
+    """
+    import mes.jobs as j
+
+    monkeypatch.setattr(j, "_code_paths_dirty", lambda: False)  # 髒的不在 code 路徑
+    monkeypatch.setattr(j, "CODE_VERSION", "abc1234-dirty")
+    assert j.code_is_stale("abc1234") is False
+
+
+def test_code_is_stale_flags_dirty_inside_code_paths(monkeypatch: Any) -> None:
+    """髒的是 src/ 或 prompts/ → 仍然 stale(這個保守是對的,不可放掉)。"""
+    import mes.jobs as j
+
+    monkeypatch.setattr(j, "_code_paths_dirty", lambda: True)
+    monkeypatch.setattr(j, "CODE_VERSION", "abc1234-dirty")
+    assert j.code_is_stale("abc1234") is True
+
+
+def test_code_is_stale_flags_dirty_when_scope_unknown(monkeypatch: Any) -> None:
+    """查不出髒在哪(git 失敗)→ 保守 stale,不可當成乾淨。"""
+    import mes.jobs as j
+
+    monkeypatch.setattr(j, "_code_paths_dirty", lambda: None)
+    monkeypatch.setattr(j, "CODE_VERSION", "abc1234-dirty")
+    assert j.code_is_stale("abc1234") is True
+
+
+def test_docs_only_dirty_still_flags_real_code_commit(monkeypatch: Any) -> None:
+    """★ 放寬 -dirty 不可順手放掉真正的落差:base commit 之間動到 code → 仍要報。
+
+    用真實 commit(找一組 src/ 有差異的),只是把工作樹的髒偽裝成「文件髒」。
+    """
+    import subprocess
+
+    import mes.jobs as j
+
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    monkeypatch.setattr(j, "_code_paths_dirty", lambda: False)
+    monkeypatch.setattr(j, "CODE_VERSION", f"{head}-dirty")
+    for c in subprocess.run(["git", "rev-list", "-n", "40", head],
+                            capture_output=True, text=True, check=True).stdout.split()[1:]:
+        short = c[:7]
+        touched = subprocess.run(
+            ["git", "diff", "--name-only", f"{short}..{head}", "--", "src", "prompts"],
+            capture_output=True, text=True, check=False).stdout.strip()
+        if touched:
+            assert j.code_is_stale(short) is True, f"{short} 動到 code,-dirty 放寬後仍須報"
+            break
+
+
+def test_code_paths_dirty_matches_reality() -> None:
+    """`_code_paths_dirty()` 與實際 `git status -- src prompts` 一致(不是憑空回答)。"""
+    import subprocess
+
+    from mes.jobs import CODE_PATHS, _code_paths_dirty
+
+    expected = bool(subprocess.run(
+        ["git", "status", "--porcelain", "--", *CODE_PATHS],
+        capture_output=True, text=True, check=False).stdout.strip())
+    assert _code_paths_dirty() is expected
 
 
 def test_code_is_stale_quiet_without_info() -> None:
