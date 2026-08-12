@@ -62,6 +62,44 @@ def _resolve_code_version() -> str | None:
 # 在 import 時凍結 —— 見上方 docstring,順序不可改。
 CODE_VERSION = _resolve_code_version()
 
+# 「實際會被執行的東西」放在哪些路徑 —— 判斷版本落差是否**有實質影響**時只看這些。
+CODE_PATHS = ("src", "prompts")
+
+
+def code_is_stale(running_version: str | None) -> bool:
+    """running 的版本與目前 HEAD 之間,`src/` 或 `prompts/` 有沒有**實質差異**。
+
+    ★ **為什麼不能直接比 hash:** hash 是 git HEAD,而 HEAD 會因為**純文件 commit** 而變 ——
+    本專案文件 commit 很頻繁,直接比 hash 會讓「跑的是舊 code」幾乎每天都亮,
+    然後被學會忽略,**真正該重啟的那次就會被漏掉**(2026-08-11 實際發生:
+    `5a435c9 → e8b0341` 只動了 4 個文件檔,daemon 跑的邏輯與 HEAD 完全相同,
+    警告卻說「需重啟」)。
+
+    這與「產出為 0 要能分辨正常閒置與異常」是同一條原則:
+    **警告必須分辨得出「有影響」與「沒差」,否則它會把自己訓練成雜訊。**
+
+    保守情況(回報為 stale,因為**無法確定**):任一邊帶 `-dirty`、或 git 查詢失敗。
+    """
+    if not running_version or not CODE_VERSION:
+        return False  # 資訊不足,不亂叫
+    running, current = running_version.strip(), CODE_VERSION.strip()
+    if running == current:
+        return False
+    # 帶 -dirty 表示當時/現在有未 commit 的改動 -> 無從比較,保守視為 stale。
+    if running.endswith("-dirty") or current.endswith("-dirty"):
+        return True
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--name-only", f"{running}..{current}", "--", *CODE_PATHS],
+            cwd=Path(__file__).resolve().parent.parent.parent,
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True  # 查不出來 -> 保守
+    if out.returncode != 0:
+        return True  # 例如 running 的 commit 已不存在 -> 保守
+    return bool(out.stdout.strip())
+
 # job_run_log.status 的受控值(不下沉 DB CHECK —— 同 alert_type,利擴充)。
 #   success / failed = 真的跑了;missed = **排程把它丟棄了,根本沒跑**(見 record_missed)。
 STATUS_SUCCESS = "success"

@@ -33,6 +33,7 @@ from mes.jobs import (
     JOB_PROJECTION,
     RAN_STATUSES,
     STATUS_MISSED,
+    code_is_stale,
 )
 from mes.notify import send_telegram
 
@@ -425,8 +426,10 @@ def _job_line(beat: JobBeat) -> str:
     # harvest 跑了 16 天舊 code)。心跳帶 code_version 後,這件事變成看得見的。
     if beat.missed_today:
         detail += f" (被排程丟棄 {beat.missed_today} 次)"
+    # ★ 只在**實質**落差時才叫(src/ 或 prompts/ 有差異)—— 純文件 commit 不算,
+    # 否則這個警告會天天亮、被學會忽略,真正該重啟的那次就漏掉。見 jobs.code_is_stale。
     ran_version = beat.last_summary.get("code_version")
-    if ran_version and CODE_VERSION and ran_version != CODE_VERSION:
+    if code_is_stale(str(ran_version) if ran_version else None):
         return (f"{beat.label}:{detail} ⚠️ 跑的是舊 code({ran_version},"
                 f"目前 {CODE_VERSION})—— 常駐 daemon 需重啟")
     # harvest 挑到 0 家要能看出是「正常閒置」而非失效。

@@ -224,3 +224,62 @@ async def test_store_harvest_not_blocked_by_baseline_lock() -> None:
         # 這把鎖只給 baseline;store-harvest 路徑不碰它 -> 立即可取得
         assert sch._BASELINE_LOCK.locked()
         await asyncio.sleep(0)  # 不會卡住
+
+
+# --- ★ 阻塞式 sleep 不得卡住排程用的事件迴圈(2026-08-12,地雷已實際引爆過)-------
+
+
+async def test_blocking_batch_does_not_block_event_loop() -> None:
+    """★ 批次內部的阻塞式 time.sleep 必須跑在 worker thread,讓事件迴圈保持自由。
+
+    2026-08-11 實測:baseline 02:00 那批跑了 93 分鐘、卡住事件迴圈,**03:00 的 harvest
+    整批消失**,而且 misfire 監聽器抓不到(迴圈停擺時 APScheduler 自己也停擺,恢復後
+    coalesce 把它合併掉)——唯一的訊號是每日安好的 7/8。
+    """
+    import asyncio
+    import time
+    from unittest.mock import patch
+
+    import mes.schedule as sch
+
+    async def blocking_batch(*, slot: int) -> None:
+        time.sleep(0.4)  # 模擬節流用的阻塞 sleep
+
+    ticks = 0
+
+    async def heartbeat_ticker() -> None:
+        """事件迴圈若被卡住,這個 ticker 就跑不動 —— 它就是探針。"""
+        nonlocal ticks
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    with patch.object(sch, "run_daily_batch", blocking_batch):
+        await asyncio.gather(sch._job(1), heartbeat_ticker())
+
+    # 批次阻塞 0.4s 期間,迴圈仍應持續轉動(若被卡住,ticks 會遠少於 20)
+    assert ticks == 20, f"事件迴圈被卡住了(只跑了 {ticks}/20 tick)"
+
+
+async def test_store_harvest_also_runs_in_worker_thread() -> None:
+    """harvest 也要走同一條路 —— 它同樣有阻塞式 sleep。"""
+    import asyncio
+    import time
+    from unittest.mock import patch
+
+    import mes.schedule as sch
+
+    async def blocking_batch() -> None:
+        time.sleep(0.3)
+
+    ticks = 0
+
+    async def ticker() -> None:
+        nonlocal ticks
+        for _ in range(15):
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    with patch.object(sch, "run_store_harvest_batch", blocking_batch):
+        await asyncio.gather(sch._store_harvest_job(), ticker())
+    assert ticks == 15, f"事件迴圈被卡住了(只跑了 {ticks}/15 tick)"

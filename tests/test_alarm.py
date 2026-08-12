@@ -514,3 +514,85 @@ def test_code_version_marks_dirty_working_tree() -> None:
         ["git", "status", "--porcelain", "--untracked-files=no"],
         capture_output=True, text=True, check=False).stdout.strip())
     assert v.endswith("-dirty") == dirty, f"code_version={v} 與工作樹狀態不符"
+
+
+# --- 版本落差要分辨「有影響」與「沒差」(2026-08-12)-------------------------
+
+
+def test_code_is_stale_ignores_docs_only_changes() -> None:
+    """★ 純文件 commit 不算 stale —— 否則警告天天亮,會被學會忽略。
+
+    2026-08-11 實際發生:5a435c9 → e8b0341 只動了 4 個文件檔,daemon 跑的邏輯與 HEAD
+    完全相同,警告卻說「需重啟」。與「產出為 0 要分辨正常閒置與異常」是同一條原則。
+    """
+    import subprocess
+
+    import mes.jobs as j
+
+    # 找兩個「之間只差文件」的真實 commit:HEAD 與它的前一個 docs-only commit
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    orig = j.CODE_VERSION
+    try:
+        j.CODE_VERSION = head
+        assert j.code_is_stale(head) is False  # 同版本
+        # 差異只在 src/prompts 之外的 commit -> 不算 stale
+        prev_docs = subprocess.run(
+            ["git", "rev-list", "-n", "40", head], capture_output=True, text=True, check=True
+        ).stdout.split()
+        for c in prev_docs[1:]:
+            short = c[:7]
+            touched = subprocess.run(
+                ["git", "diff", "--name-only", f"{short}..{head}", "--", "src", "prompts"],
+                capture_output=True, text=True, check=False).stdout.strip()
+            if not touched:
+                assert j.code_is_stale(short) is False, f"{short} 只差文件,不該算 stale"
+                break
+    finally:
+        j.CODE_VERSION = orig
+
+
+def test_code_is_stale_flags_real_code_changes() -> None:
+    """動到 src/ 或 prompts/ → 必須報 stale(這才是要抓的)。"""
+    import subprocess
+
+    import mes.jobs as j
+
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                          capture_output=True, text=True, check=True).stdout.strip()
+    orig = j.CODE_VERSION
+    try:
+        j.CODE_VERSION = head
+        for c in subprocess.run(["git", "rev-list", "-n", "40", head],
+                                capture_output=True, text=True, check=True).stdout.split()[1:]:
+            short = c[:7]
+            touched = subprocess.run(
+                ["git", "diff", "--name-only", f"{short}..{head}", "--", "src", "prompts"],
+                capture_output=True, text=True, check=False).stdout.strip()
+            if touched:
+                assert j.code_is_stale(short) is True, f"{short} 動到 code,必須報 stale"
+                break
+    finally:
+        j.CODE_VERSION = orig
+
+
+def test_code_is_stale_conservative_on_dirty() -> None:
+    """任一邊帶 -dirty → 無從比較,保守回報 stale(寧可多叫,不可漏)。"""
+    import mes.jobs as j
+
+    orig = j.CODE_VERSION
+    try:
+        j.CODE_VERSION = "abc1234"
+        assert j.code_is_stale("abc1234-dirty") is True
+        j.CODE_VERSION = "abc1234-dirty"
+        assert j.code_is_stale("def5678") is True
+    finally:
+        j.CODE_VERSION = orig
+
+
+def test_code_is_stale_quiet_without_info() -> None:
+    """資訊不足(舊心跳沒有 code_version)→ 不亂叫。"""
+    from mes.jobs import code_is_stale
+
+    assert code_is_stale(None) is False
+    assert code_is_stale("") is False

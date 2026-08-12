@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from collections.abc import Callable, Coroutine
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent
@@ -77,6 +79,31 @@ _JOB_ID_TO_CHAIN["store_harvest"] = JOB_HARVEST
 _BASELINE_LOCK = asyncio.Lock()
 
 
+async def _in_worker_thread(coro_factory: Callable[[], Coroutine[Any, Any, Any]]) -> Any:
+    """★ 把整批工作丟到 worker thread 執行,**讓排程用的事件迴圈保持自由**。
+
+    **為什麼必須這樣做(2026-08-11 實際被咬):**
+    批次內部用的是**阻塞式** `time.sleep()`(節流)與同步 httpx —— 直接在 async job 裡跑,
+    會把 APScheduler 賴以運作的事件迴圈**整個卡住**。實測:baseline 02:00 那批跑了
+    **93 分鐘**,期間迴圈完全停擺,**03:00 的 harvest 就這樣消失了**
+    (而且 **misfire 監聽器抓不到** —— 迴圈停擺時 APScheduler 自己也停擺,
+    恢復後 `coalesce` 把它合併掉,不算 misfire。唯一的訊號是每日安好的 `7/8`)。
+
+    而且趨勢在惡化:Seed 供給修好後每批真的撈滿 30 筆,baseline 每批約 90 分鐘、
+    一天三批 → **每天阻塞約 4.4 小時**,而 harvest 每 3 小時一次 —— 碰撞是必然的。
+
+    **選擇 to_thread 而非把 5 處 `time.sleep()` 改成 `await asyncio.sleep()`:**
+    後者要把整條同步鏈路(scrape / inference / harvest / reviews 的 httpx 呼叫)全部改成
+    async,牽動極廣;而**節流邏輯本身沒有問題,問題只在「它跑在哪個執行緒」**。
+    丟到 worker thread 是最小且精準的修法 —— 批次內部一行都不用動。
+
+    副作用(可接受):baseline 與 harvest 現在可能**真正並行**。這本來就是設計意圖
+    ——兩條鏈路戳的是不同對象(DDG vs 各店伺服器),限流互相獨立;
+    先前的序列化只是阻塞造成的副作用,不是刻意的約束。
+    """
+    return await asyncio.to_thread(lambda: asyncio.run(coro_factory()))
+
+
 async def _job(slot: int) -> None:
     if _BASELINE_LOCK.locked():
         logger.warning(
@@ -84,11 +111,11 @@ async def _job(slot: int) -> None:
             "讓速率翻倍)。前一批很可能跑滿了蒐集時間煞車。", slot,
         )
     async with _BASELINE_LOCK:
-        await run_daily_batch(slot=slot)
+        await _in_worker_thread(lambda: run_daily_batch(slot=slot))
 
 
 async def _store_harvest_job() -> None:
-    await run_store_harvest_batch()
+    await _in_worker_thread(run_store_harvest_batch)
 
 
 def _on_job_missed(event: JobExecutionEvent) -> None:
