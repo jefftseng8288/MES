@@ -7,6 +7,19 @@
 
 ---
 
+## ⏸️ 系統現況:四條排程全部停機中(2026-09-25 起)
+
+**Jeff 主動暫停以調整開發步驟 —— 這不是故障。**
+四個 launchd job(`harvest` / `projection` / `insight` / `alarm`)皆已 `bootout` + **`disable`**,
+重開機也不會自己回來。PostgreSQL 容器仍在跑,**資料原封不動**(Append-Only,停機只是不再新增)。
+
+- **不要把「沒有新資料 / 日報沒來」診斷成失效** —— 原因就是這個。
+- **恢復時順序不能錯:必須先 `launchctl enable`,只 `bootstrap` 會靜默失敗。**
+  完整恢復步驟與四層驗證清單見 [`progress.md`](progress.md) 2026-09-25 那則。
+- **恢復並確認四條鏈路都在跑之後,把這一節刪掉** —— 留著它本身就會變成一個過期的假訊號。
+
+---
+
 ## A. Project Overview
 
 - **MES(Market Evolution System)是一個「會因證據而改變」的市場學習系統**,把市場開發當成科學方法的循環:觀察 → 修正 → 成交 → 營收。核心是認知循環(Entity → Observation → Knowledge → Insight → Hypothesis → Experiment → Outcome → Evolution),不是一條 AI pipeline。

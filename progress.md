@@ -6,6 +6,70 @@
 
 ---
 
+## 2026-09-25 —— ⏸️ 四條排程全部停機(Jeff 調整開發步驟,主動暫停)
+
+> **★ 這是「刻意停機」,不是失效。** 幾週後若發現資料沒在長、日報沒來,**先看這一則** ——
+> 原因在這裡,恢復步驟也在這裡,不需要重新診斷一遍。
+
+**停機時間:** 2026-09-25 07:32(台灣時間)
+**原因:** Jeff 要調整開發步驟,先暫停。**非故障** —— 停機前四條鏈路運作正常。
+
+**停了什麼(四個 launchd job 全部):**
+
+| Job | 型態 | 動作 |
+|---|---|---|
+| `com.mes.harvest` | 常駐(KeepAlive) | `bootout` → 程序終止 + `disable` |
+| `com.mes.projection` | 一次性(23:30) | `bootout` + `disable` |
+| `com.mes.insight` | 一次性(23:40) | `bootout` + `disable` |
+| `com.mes.alarm` | 一次性(每日安好) | `bootout` + `disable` |
+
+- **為什麼多做 `disable`:** 只 `bootout` 的話,**重開機或重新登入會把它們自己載回來** ——
+  那違反「停下來」的意思,而且是**無聲的**(不會有任何提示說它又開始跑了)。
+- **驗證(停機後實查):** `launchctl list | grep com.mes` → 無;
+  `pgrep -fl 'mes\.(schedule|projection|insight|alarm)'` → 無殘留程序;
+  四個 label 在 `launchctl print-disabled gui/501` 皆為 `disabled`。
+
+**停在哪個位置(沒有中斷到任何批次):**
+
+```
+baseline   最後一批 09-25 02:00
+harvest    最後一批 09-25 06:00   ← 下一批 09:00,停機時還沒到
+projection 最後一批 09-24 23:30
+insight    最後一批 09-24 23:40
+```
+
+停機時刻(07:32)落在**兩批之間**,沒有半途被砍的批次。
+
+**沒有動的東西:** PostgreSQL 容器 `mes-postgres-1` 仍在運行(healthy),**資料原封不動**。
+`observation_log` 是 Append-Only,停機期間只是不再新增,既有資料與歷史完全不受影響。
+
+### ▶️ 恢復步驟(★ 順序不能錯)
+
+因為停機時做了 `launchctl disable`,**只 `bootstrap` 會失敗,而且是「看起來沒事」的失敗** ——
+必須先 `enable`:
+
+```bash
+for j in harvest projection insight alarm; do
+  launchctl enable    gui/501/com.mes.$j          # ← 少了這步會靜默失敗
+  launchctl bootstrap gui/501 ~/Library/LaunchAgents/com.mes.$j.plist
+done
+launchctl list | grep com.mes                      # 第一層:有沒有掛上
+```
+
+**然後照本專案既有的紀律驗後面幾層(「掛上去 ≠ 會執行 ≠ 有產出 ≠ 跑的是新 code」):**
+
+1. **有沒有掛** → `launchctl list | grep com.mes`
+2. **會不會執行** → `launchctl kickstart -k gui/501/com.mes.harvest`,看 log 真的被寫入
+3. **執行有沒有產出** → 查 `job_run_log` 真的多了列、`observation_log` 真的多了資料
+4. **跑的是哪一版** → 心跳的 `summary->>'code_version'` 要等於當時的 git HEAD
+   (**常駐的 `com.mes.harvest` 把 code 凍結在程序啟動當下** —— 若停機期間改過 `src/`,
+   恢復後務必確認這一項)
+
+**恢復時值得順手看的事:** 停機期間若有 commit 動到 `src/` 或 `prompts/`,
+第 4 項就是必查;若完全沒改過 code,四層仍要走完,只是第 4 項會自然對上。
+
+---
+
 ## 2026-08-13 —— stale 誤報的第二個入口 + 阻塞修法的生產驗證
 
 **一、生產驗證:8/12 的阻塞修法有效(查 `job_run_log` 實測,非推論)**
